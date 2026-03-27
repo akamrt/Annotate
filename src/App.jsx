@@ -2088,7 +2088,7 @@ export default function App() {
                         <div className="mb-4">
                             <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider block mb-2">Color</label>
                             <div className="flex flex-wrap gap-2">
-                                {['#ffffff', '#000000', '#ff0000', '#00ff00', '#0000ff', '#ffff00'].map(c => (
+                                {['#ffffff', '#000000', '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef', '#f43f5e'].map(c => (
                                     <button key={c} onClick={() => setBrushColor(c)} className={`w-6 h-6 rounded-full border border-neutral-700 ${brushColor === c ? 'ring-2 ring-blue-500' : ''}`} style={{ backgroundColor: c }} />
                                 ))}
                                 <input type="color" value={brushColor} onChange={e => setBrushColor(e.target.value)} className="w-6 h-6 p-0 border-0 rounded-full overflow-hidden" />
