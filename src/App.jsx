@@ -1974,7 +1974,22 @@ export default function App() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    {/* Tools would go here */}
+                    <label className="cursor-pointer bg-neutral-800 hover:bg-neutral-700 text-xs px-3 py-1.5 rounded flex items-center gap-2 transition-colors">
+                        <Film size={14} />
+                        <span>Upload Video</span>
+                        <input 
+                            type="file" 
+                            accept="video/*" 
+                            className="hidden" 
+                            onChange={(e) => {
+                                const file = e.target.files[0];
+                                if (file) {
+                                    const url = URL.createObjectURL(file);
+                                    setVideoSrc(url);
+                                }
+                            }}
+                        />
+                    </label>
                 </div>
             </div>
 
