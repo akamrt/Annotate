@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { HexColorPicker } from 'react-colorful';
 import {
     Play,
     Pause,
@@ -2087,11 +2088,25 @@ export default function App() {
 
                         <div className="mb-4">
                             <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider block mb-2">Color</label>
-                            <div className="flex flex-wrap gap-2">
-                                {['#ffffff', '#000000', '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef', '#f43f5e'].map(c => (
-                                    <button key={c} onClick={() => setBrushColor(c)} className={`w-6 h-6 rounded-full border border-neutral-700 ${brushColor === c ? 'ring-2 ring-blue-500' : ''}`} style={{ backgroundColor: c }} />
-                                ))}
-                                <input type="color" value={brushColor} onChange={e => setBrushColor(e.target.value)} className="w-6 h-6 p-0 border-0 rounded-full overflow-hidden" />
+                            <div className="flex flex-col gap-3">
+                                <div className="w-full">
+                                    <HexColorPicker color={brushColor} onChange={setBrushColor} style={{ width: '100%', height: '160px' }} />
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <div className="w-8 h-8 rounded border border-neutral-700 shadow-inner shrink-0" style={{ backgroundColor: brushColor }} />
+                                    <input 
+                                        type="text" 
+                                        value={brushColor} 
+                                        onChange={e => setBrushColor(e.target.value)} 
+                                        className="bg-neutral-800 border border-neutral-700 text-white text-xs px-2 py-1.5 rounded w-full font-mono outline-none focus:border-blue-500 uppercase"
+                                        spellCheck={false}
+                                    />
+                                </div>
+                                <div className="flex flex-wrap gap-1.5 mt-1 border-t border-neutral-800 pt-3">
+                                    {['#ffffff', '#000000', '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#d946ef', '#f43f5e'].map(c => (
+                                        <button key={c} title={c} onClick={() => setBrushColor(c)} className={`w-5 h-5 rounded hover:scale-110 transition-transform border border-neutral-700 ${brushColor === c ? 'ring-2 ring-blue-500' : ''}`} style={{ backgroundColor: c }} />
+                                    ))}
+                                </div>
                             </div>
                         </div>
 
