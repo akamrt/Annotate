@@ -1,6 +1,24 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { HexColorPicker } from 'react-colorful';
 import {
+    createVertex,
+    getEffectiveAnchor,
+    getEffectiveHandleOut,
+    getEffectiveHandleIn,
+    drawVectorStroke,
+    drawVectorHandles,
+    hitTestAnchor,
+    hitTestVectorStroke,
+    getVectorStrokeBounds,
+    applySculptGrab,
+    applySculptPush,
+    applySculptPull,
+    getVertexAtFrame,
+    resolveVerticesAtFrame,
+    setVertexAnimKey,
+    collectAnimKeyOffsets
+} from './vectorUtils';
+import {
     Play,
     Pause,
     Volume2,
@@ -48,9 +66,13 @@ import {
     Plus,
     Eye,
     EyeOff,
-    Lock,
     Unlock,
-    GripVertical
+    GripVertical,
+    Spline,
+    HandGrab,
+    CircleDot,
+    Magnet,
+    Crosshair
 } from 'lucide-react';
 
 const FPS = 24;
@@ -78,7 +100,15 @@ const getStrokesBounds = (strokes) => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
     strokes.forEach(stroke => {
-        if (stroke.type === 'text') {
+        if (stroke.type === 'vector') {
+            const vb = getVectorStrokeBounds(stroke);
+            if (vb) {
+                if (vb.x < minX) minX = vb.x;
+                if (vb.x + vb.w > maxX) maxX = vb.x + vb.w;
+                if (vb.y < minY) minY = vb.y;
+                if (vb.y + vb.h > maxY) maxY = vb.y + vb.h;
+            }
+        } else if (stroke.type === 'text') {
             const p = stroke.points[0];
             const width = stroke.text.length * stroke.size * 0.6;
             const height = stroke.size;
@@ -140,6 +170,9 @@ const getBoxIntersection = (p1, p2, box) => {
 };
 
 const isPointInStroke = (point, stroke) => {
+    if (stroke.type === 'vector') {
+        return hitTestVectorStroke(point, stroke, Math.max(12, stroke.size));
+    }
     if (stroke.type === 'text') {
         const b = getStrokesBounds([stroke]);
         const padding = 10;
@@ -178,11 +211,12 @@ const KeyframeThumbnail = ({ strokes, width, height }) => {
         ctx.scale(scale, scale);
 
         strokes.forEach(stroke => {
+            if (stroke.type === 'vector') return; // vector strokes use vertices, not points
             if (stroke.type === 'text') {
                 ctx.font = `bold ${stroke.size}px ${stroke.fontFamily || 'sans-serif'}`;
                 ctx.fillStyle = stroke.color;
                 ctx.textBaseline = 'middle';
-                if (stroke.points[0]) ctx.fillText(stroke.text, stroke.points[0].x, stroke.points[0].y);
+                if (stroke.points && stroke.points[0]) ctx.fillText(stroke.text, stroke.points[0].x, stroke.points[0].y);
             } else {
                 ctx.beginPath();
                 ctx.lineCap = 'round';
@@ -190,7 +224,7 @@ const KeyframeThumbnail = ({ strokes, width, height }) => {
                 ctx.lineWidth = stroke.size;
                 ctx.strokeStyle = stroke.color;
                 ctx.globalAlpha = stroke.opacity || 1;
-                if (stroke.points.length > 0) {
+                if (stroke.points && stroke.points.length > 0) {
                     ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
                     for (let i = 1; i < stroke.points.length; i++) {
                         ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
@@ -223,7 +257,10 @@ const Timeline = ({
     togglePlay,
     isPlaying,
     selectedKeyframeIds,
-    onSelectKeyframes
+    onSelectKeyframes,
+    selectedAnimKeys,
+    onSelectAnimKeys,
+    onMoveAnimKeys,
 }) => {
     const scrollContainerRef = useRef(null);
     const [draggingId, setDraggingId] = useState(null);
@@ -236,6 +273,44 @@ const Timeline = ({
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
     const [currentMousePos, setCurrentMousePos] = useState({ x: 0, y: 0 });
     const [initialDragState, setInitialDragState] = useState(null);
+
+    // Per-layer anim key visibility (layerId → hidden)
+    const [animKeysHiddenLayers, setAnimKeysHiddenLayers] = useState(new Set());
+    const isAnimKeysVisible = (layerId) => !animKeysHiddenLayers.has(layerId);
+    const toggleAnimKeysVisible = (layerId, e) => {
+        e.stopPropagation();
+        setAnimKeysHiddenLayers(prev => {
+            const next = new Set(prev);
+            if (next.has(layerId)) next.delete(layerId); else next.add(layerId);
+            return next;
+        });
+        // Clear selection for keys that are now hidden
+        onSelectAnimKeys(prev => prev.filter(k => {
+            const kf = keyframes.find(f => f.id === k.kfId);
+            return kf?.layerId !== layerId;
+        }));
+    };
+
+    // Click on an anim key marker — select it, deselect clips
+    const handleAnimKeyMouseDown = (e, kfId, frameOffset) => {
+        e.stopPropagation();
+        const key = { kfId, frameOffset };
+        let newSel;
+        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+            const exists = selectedAnimKeys.some(k => k.kfId === kfId && k.frameOffset === frameOffset);
+            newSel = exists
+                ? selectedAnimKeys.filter(k => !(k.kfId === kfId && k.frameOffset === frameOffset))
+                : [...selectedAnimKeys, key];
+        } else {
+            newSel = [key];
+        }
+        onSelectAnimKeys(newSel);
+        onSelectKeyframes([]); // deselect clips
+        // Start an animkey drag
+        setDragStart({ x: e.clientX, y: e.clientY });
+        setInitialDragState({ animKeys: newSel });
+        setInteractionMode('drag-animkey');
+    };
 
     useEffect(() => {
         if (scrollContainerRef.current && isPlaying && !isScrubbing && interactionMode === 'none') {
@@ -278,11 +353,13 @@ const Timeline = ({
 
         if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
             onSelectKeyframes([]);
+            onSelectAnimKeys([]);
         }
     };
 
     const handleKeyframeMouseDown = (e, kf, isResize = false) => {
         e.stopPropagation();
+        onSelectAnimKeys([]); // selecting a clip clears anim key selection
         let newSelection = [...selectedKeyframeIds];
         const isSelected = newSelection.includes(kf.id);
 
@@ -343,26 +420,55 @@ const Timeline = ({
                     const y1 = Math.min(dragStart.y, currentMousePos.y) - rect.top - scrollTop;
                     const y2 = Math.max(dragStart.y, currentMousePos.y) - rect.top - scrollTop;
 
-                    const selected = [];
+                    // Check for anim key markers within the marquee first
+                    const hitAnimKeys = [];
                     keyframes.forEach(kf => {
+                        if (!isAnimKeysVisible(kf.layerId)) return;
                         const layerIndex = displayLayers.findIndex(l => l.id === kf.layerId);
                         if (layerIndex === -1) return;
-
-                        const kfX = kf.startFrame * PIXELS_PER_FRAME;
-                        const kfW = kf.duration * PIXELS_PER_FRAME;
                         const kfY = layerIndex * TRACK_HEIGHT;
-                        const kfH = TRACK_HEIGHT;
-
-                        if (x1 < kfX + kfW && x2 > kfX && y1 < kfY + kfH && y2 > kfY) {
-                            selected.push(kf.id);
-                        }
+                        const offsets = collectAnimKeyOffsets(kf.strokes);
+                        offsets.forEach(offset => {
+                            const markerX = (kf.startFrame + offset) * PIXELS_PER_FRAME + PIXELS_PER_FRAME / 2;
+                            const markerY = kfY + TRACK_HEIGHT / 2;
+                            const hitW = 8, hitH = 8;
+                            if (x1 <= markerX + hitW && x2 >= markerX - hitW &&
+                                y1 <= markerY + hitH && y2 >= markerY - hitH) {
+                                hitAnimKeys.push({ kfId: kf.id, frameOffset: offset });
+                            }
+                        });
                     });
 
-                    if (e.shiftKey) {
-                        const unique = new Set([...selectedKeyframeIds, ...selected]);
-                        onSelectKeyframes(Array.from(unique));
+                    if (hitAnimKeys.length > 0) {
+                        // Anim key marquee: select markers, NOT clips
+                        if (e.shiftKey) {
+                            const map = new Map(selectedAnimKeys.map(k => [`${k.kfId}:${k.frameOffset}`, k]));
+                            hitAnimKeys.forEach(k => map.set(`${k.kfId}:${k.frameOffset}`, k));
+                            onSelectAnimKeys(Array.from(map.values()));
+                        } else {
+                            onSelectAnimKeys(hitAnimKeys);
+                        }
+                        onSelectKeyframes([]);
                     } else {
-                        onSelectKeyframes(selected);
+                        // Clip marquee: original behavior
+                        const selected = [];
+                        keyframes.forEach(kf => {
+                            const layerIndex = displayLayers.findIndex(l => l.id === kf.layerId);
+                            if (layerIndex === -1) return;
+                            const kfX = kf.startFrame * PIXELS_PER_FRAME;
+                            const kfW = kf.duration * PIXELS_PER_FRAME;
+                            const kfY = layerIndex * TRACK_HEIGHT;
+                            const kfH = TRACK_HEIGHT;
+                            if (x1 < kfX + kfW && x2 > kfX && y1 < kfY + kfH && y2 > kfY) {
+                                selected.push(kf.id);
+                            }
+                        });
+                        if (e.shiftKey) {
+                            const unique = new Set([...selectedKeyframeIds, ...selected]);
+                            onSelectKeyframes(Array.from(unique));
+                        } else {
+                            onSelectKeyframes(selected);
+                        }
                     }
                 }
             }
@@ -384,6 +490,13 @@ const Timeline = ({
                     onDragKeyframeDuration(targetKf.id, Math.max(1, targetKf.duration + deltaFrames));
                 }
             }
+            else if (interactionMode === 'drag-animkey') {
+                const deltaX = e.clientX - dragStart.x;
+                const deltaFrames = Math.round(deltaX / PIXELS_PER_FRAME);
+                if (deltaFrames !== 0 && initialDragState?.animKeys) {
+                    onMoveAnimKeys(initialDragState.animKeys, deltaFrames);
+                }
+            }
 
             setInteractionMode('none');
             setInitialDragState(null);
@@ -395,7 +508,7 @@ const Timeline = ({
             window.removeEventListener('mousemove', handleGlobalMouseMove);
             window.removeEventListener('mouseup', handleGlobalMouseUp);
         };
-    }, [interactionMode, dragStart, currentMousePos, selectedKeyframeIds, keyframes, displayLayers, onSeek, onSelectKeyframes, onMoveKeyframes, onDragKeyframeDuration, initialDragState]);
+    }, [interactionMode, dragStart, currentMousePos, selectedKeyframeIds, selectedAnimKeys, keyframes, displayLayers, onSeek, onSelectKeyframes, onMoveKeyframes, onDragKeyframeDuration, initialDragState, onSelectAnimKeys, onMoveAnimKeys, animKeysHiddenLayers]);
 
     const dragDeltaFrames = interactionMode.startsWith('drag') || interactionMode === 'resize-keyframe'
         ? Math.round((currentMousePos.x - dragStart.x) / PIXELS_PER_FRAME)
@@ -422,16 +535,34 @@ const Timeline = ({
             <div className="flex flex-1 overflow-hidden relative">
                 <div className="w-48 flex-shrink-0 bg-[#252525] border-r border-neutral-700 z-20 shadow-lg overflow-y-auto custom-scrollbar no-scrollbar"
                     style={{ paddingTop: '32px' }}>
-                    {displayLayers.map(layer => (
-                        <div
-                            key={layer.id}
-                            onClick={() => onSelectLayer(layer.id)}
-                            className={`flex items-center px-3 border-b border-neutral-800 cursor-pointer ${activeLayerId === layer.id ? 'bg-[#3a3a3a] border-l-4 border-l-orange-500' : 'hover:bg-[#2a2a2a]'}`}
-                            style={{ height: TRACK_HEIGHT }}
-                        >
-                            <span className={`text-xs ${activeLayerId === layer.id ? 'text-white font-bold' : 'text-neutral-400'}`}>{layer.name}</span>
-                        </div>
-                    ))}
+                    {displayLayers.map(layer => {
+                        const keysVisible = isAnimKeysVisible(layer.id);
+                        return (
+                            <div
+                                key={layer.id}
+                                onClick={() => onSelectLayer(layer.id)}
+                                className={`flex items-center px-2 border-b border-neutral-800 cursor-pointer gap-1 ${activeLayerId === layer.id ? 'bg-[#3a3a3a] border-l-4 border-l-orange-500' : 'hover:bg-[#2a2a2a]'}`}
+                                style={{ height: TRACK_HEIGHT }}
+                            >
+                                <span className={`text-xs flex-1 truncate ${activeLayerId === layer.id ? 'text-white font-bold' : 'text-neutral-400'}`}>{layer.name}</span>
+                                {/* Toggle vertex anim key visibility */}
+                                <button
+                                    title={keysVisible ? 'Hide vertex keys' : 'Show vertex keys'}
+                                    onClick={(e) => toggleAnimKeysVisible(layer.id, e)}
+                                    className={`flex-shrink-0 w-5 h-5 flex items-center justify-center rounded transition-colors ${keysVisible ? 'text-yellow-400 hover:text-yellow-200' : 'text-neutral-600 hover:text-neutral-400'}`}
+                                    style={{ fontSize: 10 }}
+                                >
+                                    {/* Diamond shape */}
+                                    <div style={{
+                                        width: 8, height: 8,
+                                        background: keysVisible ? '#fbbf24' : '#555',
+                                        transform: 'rotate(45deg)',
+                                        border: keysVisible ? '1px solid #78350f' : '1px solid #444'
+                                    }} />
+                                </button>
+                            </div>
+                        );
+                    })}
                 </div>
 
                 <div
@@ -496,6 +627,8 @@ const Timeline = ({
                                             displayDuration += dragDeltaFrames;
                                         }
 
+                                        const animOffsets = isAnimKeysVisible(layer.id) ? collectAnimKeyOffsets(kf.strokes) : [];
+
                                         return (
                                             <div
                                                 key={kf.id}
@@ -515,6 +648,41 @@ const Timeline = ({
                                                         </div>
                                                     )}
                                                 </div>
+
+                                                {/* Per-vertex animation key markers — interactive */}
+                                                {animOffsets.map(offset => {
+                                                    if (offset >= displayDuration) return null;
+                                                    const isAnimKeySelected = selectedAnimKeys.some(
+                                                        k => k.kfId === kf.id && k.frameOffset === offset
+                                                    );
+                                                    // Shift position during drag
+                                                    const draggedOffset = (interactionMode === 'drag-animkey' && isAnimKeySelected)
+                                                        ? offset + dragDeltaFrames
+                                                        : offset;
+                                                    if (draggedOffset < 0 || draggedOffset >= displayDuration) return null;
+                                                    return (
+                                                        <div
+                                                            key={`anim-${offset}`}
+                                                            className="absolute cursor-pointer"
+                                                            style={{
+                                                                left: draggedOffset * PIXELS_PER_FRAME + (PIXELS_PER_FRAME / 2) - 6,
+                                                                top: '50%',
+                                                                width: 12,
+                                                                height: 12,
+                                                                marginTop: -6,
+                                                                zIndex: 15
+                                                            }}
+                                                            onMouseDown={(e) => handleAnimKeyMouseDown(e, kf.id, offset)}
+                                                        >
+                                                            <div style={{
+                                                                width: '100%', height: '100%',
+                                                                background: isAnimKeySelected ? '#fff' : '#fbbf24',
+                                                                transform: 'rotate(45deg)',
+                                                                border: isAnimKeySelected ? '2px solid #3b82f6' : '1px solid #78350f',
+                                                            }} />
+                                                        </div>
+                                                    );
+                                                })}
 
                                                 <div
                                                     className="absolute top-0 bottom-0 right-0 w-3 cursor-e-resize hover:bg-orange-500/50 flex items-center justify-center group-hover:bg-white/10 z-20"
@@ -641,6 +809,7 @@ export default function App() {
 
     // NEW: SELECTION STATE
     const [selectedKeyframeIds, setSelectedKeyframeIds] = useState([]);
+    const [selectedAnimKeys, setSelectedAnimKeys] = useState([]); // [{kfId, frameOffset}]
 
     const undoStack = useRef([]);
     const redoStack = useRef([]);
@@ -709,6 +878,27 @@ export default function App() {
         pendingStrokes: null
     });
     const [selectionActive, setSelectionActive] = useState(false);
+
+    // --- PEN TOOL STATE ---
+    const penToolStateRef = useRef({
+        strokeId: null,        // ID of the vector stroke being built
+        isDraggingHandle: false,
+        lastVertexId: null,
+        isActive: false        // true while building a path
+    });
+    const [penToolActive, setPenToolActive] = useState(false);
+    const [selectedVertexIds, setSelectedVertexIds] = useState([]);
+    const [vectorEditStrokeIndex, setVectorEditStrokeIndex] = useState(-1); // index of stroke in direct-select mode
+
+    // --- VECTOR DIRECT SELECTION DRAG STATE ---
+    const vectorDragRef = useRef({
+        active: false,
+        strokeIndex: -1,
+        vertexId: null,
+        part: null,          // 'anchor' | 'handleIn' | 'handleOut'
+        startCoords: null,
+        altKey: false         // for breaking tangent
+    });
 
     // --- HELPERS ---
     const timeToFrame = (time) => Math.floor(time * FPS);
@@ -815,6 +1005,10 @@ export default function App() {
 
     // --- RENDERING ---
     const drawStroke = useCallback((ctx, stroke, isGhost, colorOverride = null) => {
+        if (stroke.type === 'vector') {
+            drawVectorStroke(ctx, stroke, isGhost, colorOverride);
+            return;
+        }
         if (stroke.type === 'text') {
             const fontSize = stroke.size;
             const fontFamily = stroke.fontFamily || 'sans-serif';
@@ -901,9 +1095,13 @@ export default function App() {
                     const kf = getActiveKeyframe(activeLayer.id, checkFrame);
                     if (kf && checkFrame >= 0) {
                         const onionOpacity = 0.3 * (1 - (i / (onionFramesBefore + 1)));
+                        const onionLocal = checkFrame - kf.startFrame;
                         kf.strokes.forEach(stroke => {
                             ctx.globalAlpha = onionOpacity;
-                            drawStroke(ctx, stroke, true, '#ef4444');
+                            const s = (stroke.type === 'vector' && stroke.vertices)
+                                ? { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, onionLocal) }
+                                : stroke;
+                            drawStroke(ctx, s, true, '#ef4444');
                         });
                     }
                 }
@@ -912,9 +1110,13 @@ export default function App() {
                     const kf = getActiveKeyframe(activeLayer.id, checkFrame);
                     if (kf && checkFrame <= totalFrames) {
                         const onionOpacity = 0.3 * (1 - (i / (onionFramesAfter + 1)));
+                        const onionLocal = checkFrame - kf.startFrame;
                         kf.strokes.forEach(stroke => {
                             ctx.globalAlpha = onionOpacity;
-                            drawStroke(ctx, stroke, true, '#3b82f6');
+                            const s = (stroke.type === 'vector' && stroke.vertices)
+                                ? { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, onionLocal) }
+                                : stroke;
+                            drawStroke(ctx, s, true, '#3b82f6');
                         });
                     }
                 }
@@ -927,6 +1129,7 @@ export default function App() {
 
             const kf = getActiveKeyframe(layer.id, frame);
             let strokesToDraw = kf ? kf.strokes : [];
+            const localFrame = kf ? frame - kf.startFrame : 0;
 
             // Handle pending slice/marquee preview
             if (sel.active && sel.pendingStrokes && frame === currentFrame && layer.id === activeLayerId) {
@@ -934,6 +1137,12 @@ export default function App() {
             }
 
             ctx.globalAlpha = layer.opacity !== undefined ? layer.opacity : 1;
+
+            // Resolve vector strokes' vertices to the current localFrame (animation playback)
+            const resolveStrokeForFrame = (s) => {
+                if (s.type !== 'vector' || !s.vertices) return s;
+                return { ...s, vertices: resolveVerticesAtFrame(s.vertices, localFrame) };
+            };
 
             strokesToDraw.forEach((stroke, index) => {
                 const isSelected = !contextOverride && sel.active && sel.indices.includes(index) && layer.id === activeLayerId;
@@ -943,15 +1152,26 @@ export default function App() {
                     if (originalStroke) {
                         const t = sel.transform;
                         const center = { x: sel.bounds.cx, y: sel.bounds.cy };
-                        const transformedPoints = originalStroke.points.map(p => getTransformedPoint(p, center, t));
-                        const avgScale = (Math.abs(t.scaleX) + Math.abs(t.scaleY)) / 2;
-                        const scaledSize = Math.max(1, originalStroke.size * avgScale);
-                        drawStroke(ctx, { ...originalStroke, points: transformedPoints, size: scaledSize }, false, null);
+                        if (originalStroke.type === 'vector') {
+                            const resolvedSource = resolveVerticesAtFrame(originalStroke.vertices, localFrame);
+                            const transformedVertices = resolvedSource.map(v => ({
+                                ...v,
+                                anchor: getTransformedPoint(v.anchor, center, t),
+                                handleIn: getTransformedPoint(v.handleIn, center, t),
+                                handleOut: getTransformedPoint(v.handleOut, center, t),
+                            }));
+                            drawStroke(ctx, { ...originalStroke, vertices: transformedVertices }, false, null);
+                        } else {
+                            const transformedPoints = originalStroke.points.map(p => getTransformedPoint(p, center, t));
+                            const avgScale = (Math.abs(t.scaleX) + Math.abs(t.scaleY)) / 2;
+                            const scaledSize = Math.max(1, originalStroke.size * avgScale);
+                            drawStroke(ctx, { ...originalStroke, points: transformedPoints, size: scaledSize }, false, null);
+                        }
                     } else {
-                        drawStroke(ctx, stroke, false, null);
+                        drawStroke(ctx, resolveStrokeForFrame(stroke), false, null);
                     }
                 } else {
-                    drawStroke(ctx, stroke, false, null);
+                    drawStroke(ctx, resolveStrokeForFrame(stroke), false, null);
                 }
             });
         });
@@ -1028,9 +1248,29 @@ export default function App() {
             ctx.restore();
         }
 
+        // --- VECTOR HANDLES OVERLAY ---
+        if (!contextOverride && penToolActive) {
+            const activeKf = getActiveKeyframe(activeLayerId, currentFrame);
+            const currentStrokes = activeKf ? activeKf.strokes : [];
+            const localFrame = activeKf ? currentFrame - activeKf.startFrame : 0;
+            currentStrokes.forEach((stroke, idx) => {
+                if (stroke.type === 'vector') {
+                    const penState = penToolStateRef.current;
+                    const isActiveStroke = penState.isActive && stroke._penId === penState.strokeId;
+                    if (isActiveStroke || idx === vectorEditStrokeIndex) {
+                        // Resolve vertices to current frame so handles render at animated positions
+                        const resolvedStroke = isActiveStroke
+                            ? stroke // pen tool actively building → use raw vertices
+                            : { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, localFrame) };
+                        drawVectorHandles(ctx, resolvedStroke, selectedVertexIds);
+                    }
+                }
+            });
+        }
+
         if (scale !== 1) { ctx.restore(); }
 
-    }, [isOnionSkin, onionFramesBefore, onionFramesAfter, drawStroke, totalFrames, layers, currentFrame, activeLayerId]);
+    }, [isOnionSkin, onionFramesBefore, onionFramesAfter, drawStroke, totalFrames, layers, currentFrame, activeLayerId, penToolActive, selectedVertexIds, vectorEditStrokeIndex]);
 
     useEffect(() => {
         renderAnnotations(currentFrame);
@@ -1102,6 +1342,103 @@ export default function App() {
 
         const sel = selectionRef.current;
 
+        // --- PEN TOOL ---
+        if (selectedTool === 'pen') {
+            if (isPlaying) setIsPlaying(false);
+            const activeLayer = layers.find(l => l.id === activeLayerId);
+            if (activeLayer && (activeLayer.locked || !activeLayer.visible)) return;
+
+            const penState = penToolStateRef.current;
+
+            if (penState.isActive) {
+                // We have an active path being built
+                const currentKf = getActiveKeyframe(activeLayerId, currentFrame);
+                if (!currentKf) return;
+                const strokeIdx = currentKf.strokes.findIndex(s => s._penId === penState.strokeId);
+                if (strokeIdx === -1) return;
+                const stroke = currentKf.strokes[strokeIdx];
+
+                // Check if clicking the first vertex (close path)
+                if (stroke.vertices.length > 2) {
+                    const firstAnchor = getEffectiveAnchor(stroke.vertices[0]);
+                    const dist = Math.hypot(coords.x - firstAnchor.x, coords.y - firstAnchor.y);
+                    if (dist < 12) {
+                        // Close the path
+                        stroke.closed = true;
+                        penState.isActive = false;
+                        penState.strokeId = null;
+                        penState.lastVertexId = null;
+                        setPenToolActive(false);
+                        setSelectedVertexIds([]);
+                        saveUndoState();
+                        updateKeyframes([...keyframesRef.current]);
+                        renderAnnotations(currentFrame);
+                        return;
+                    }
+                }
+
+                // Add a new vertex
+                saveUndoState();
+                const newVertex = createVertex(coords.x, coords.y);
+                stroke.vertices.push(newVertex);
+                penState.lastVertexId = newVertex.id;
+                penState.isDraggingHandle = true;
+                setSelectedVertexIds([newVertex.id]);
+                updateKeyframes([...keyframesRef.current]);
+                renderAnnotations(currentFrame);
+                return;
+            }
+
+            // Start a new vector path
+            saveUndoState();
+            const penId = `pen-${Date.now()}`;
+            const firstVertex = createVertex(coords.x, coords.y);
+
+            const newStroke = {
+                type: 'vector',
+                tool: 'pen',
+                _penId: penId,
+                color: brushColor,
+                size: brushSize > 20 ? 3 : Math.max(1, Math.min(brushSize, 8)),
+                opacity: brushOpacity,
+                closed: false,
+                fill: null,
+                vertices: [firstVertex],
+                layerId: activeLayerId
+            };
+
+            let activeKeyframe = getActiveKeyframe(activeLayerId, currentFrame);
+            if (!activeKeyframe) {
+                let duration = 1;
+                if (smartFill) {
+                    const layerKeyframes = keyframesRef.current.filter(k => k.layerId === activeLayerId).sort((a, b) => a.startFrame - b.startFrame);
+                    const nextKf = layerKeyframes.find(k => k.startFrame > currentFrame);
+                    const limit = nextKf ? nextKf.startFrame : totalFrames;
+                    duration = Math.max(1, limit - currentFrame);
+                }
+                activeKeyframe = {
+                    id: `kf-${Date.now()}`,
+                    layerId: activeLayerId,
+                    startFrame: currentFrame,
+                    duration: duration,
+                    strokes: []
+                };
+                keyframesRef.current.push(activeKeyframe);
+            }
+
+            activeKeyframe.strokes.push(newStroke);
+
+            penState.isActive = true;
+            penState.strokeId = penId;
+            penState.lastVertexId = firstVertex.id;
+            penState.isDraggingHandle = true;
+            setPenToolActive(true);
+            setSelectedVertexIds([firstVertex.id]);
+            updateKeyframes([...keyframesRef.current]);
+            renderAnnotations(currentFrame);
+            return;
+        }
+
         // --- TEXT TOOL START ---
         if (selectedTool === 'text') {
             if (activeText) { confirmText(); return; }
@@ -1145,6 +1482,77 @@ export default function App() {
 
             setIsPlaying(false);
             setActiveText({ x: coords.x, y: coords.y, val: '', layerId: activeLayerId });
+            return;
+        }
+
+        // --- VERTEX TOOL (Direct Selection, like Illustrator's A key) ---
+        if (selectedTool === 'vertex') {
+            const activeKf = getActiveKeyframe(activeLayerId, currentFrame);
+            const currentStrokes = activeKf ? activeKf.strokes : [];
+            const localFrame = activeKf ? currentFrame - activeKf.startFrame : 0;
+
+            // If already editing a stroke, test anchors/handles first (against resolved positions)
+            if (vectorEditStrokeIndex >= 0 && currentStrokes[vectorEditStrokeIndex]?.type === 'vector') {
+                const stroke = currentStrokes[vectorEditStrokeIndex];
+                const resolvedVerts = resolveVerticesAtFrame(stroke.vertices, localFrame);
+                const hit = hitTestAnchor(coords, resolvedVerts, 12 / viewTransform.k);
+                if (hit) {
+                    saveUndoState();
+                    if (e.shiftKey) {
+                        setSelectedVertexIds(prev =>
+                            prev.includes(hit.vertexId)
+                                ? prev.filter(id => id !== hit.vertexId)
+                                : [...prev, hit.vertexId]
+                        );
+                    } else {
+                        setSelectedVertexIds([hit.vertexId]);
+                    }
+                    // Record baseline resolved values for ALL currently selected vertices
+                    // (or just this one if not in selection) so multi-vertex drag stays consistent
+                    const dragVertexIds = (e.shiftKey || selectedVertexIds.includes(hit.vertexId))
+                        ? Array.from(new Set([...selectedVertexIds, hit.vertexId]))
+                        : [hit.vertexId];
+                    const baselines = {};
+                    stroke.vertices.forEach(v => {
+                        if (dragVertexIds.includes(v.id)) {
+                            baselines[v.id] = getVertexAtFrame(v, localFrame);
+                        }
+                    });
+                    vectorDragRef.current = {
+                        active: true,
+                        strokeIndex: vectorEditStrokeIndex,
+                        vertexId: hit.vertexId,
+                        part: hit.part,
+                        startCoords: coords,
+                        altKey: e.altKey,
+                        localFrame,
+                        keyframeId: activeKf?.id,
+                        baselines
+                    };
+                    renderAnnotations(currentFrame);
+                    return;
+                }
+            }
+
+            // Single-click on any vector stroke → enter vertex edit mode
+            for (let i = currentStrokes.length - 1; i >= 0; i--) {
+                const stroke = currentStrokes[i];
+                if (stroke.type !== 'vector') continue;
+                const resolvedStroke = { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, localFrame) };
+                if (hitTestVectorStroke(coords, resolvedStroke)) {
+                    setVectorEditStrokeIndex(i);
+                    setSelectedVertexIds(stroke.vertices.map(v => v.id));
+                    setPenToolActive(true);
+                    renderAnnotations(currentFrame);
+                    return;
+                }
+            }
+
+            // Click in empty space → exit vertex edit mode
+            setVectorEditStrokeIndex(-1);
+            setSelectedVertexIds([]);
+            setPenToolActive(false);
+            renderAnnotations(currentFrame);
             return;
         }
 
@@ -1202,13 +1610,94 @@ export default function App() {
 
             if (selectedTool === 'pointer' || selectedTool === 'select') {
                 const currentStrokes = getCurrentFrameStrokes(activeLayerId, currentFrame);
+
+                // --- VECTOR DIRECT SELECTION: If in vector edit mode, test anchors/handles first ---
+                if (vectorEditStrokeIndex >= 0 && currentStrokes[vectorEditStrokeIndex]?.type === 'vector') {
+                    const stroke = currentStrokes[vectorEditStrokeIndex];
+                    const activeKfForDrag = getActiveKeyframe(activeLayerId, currentFrame);
+                    const localFrameForDrag = activeKfForDrag ? currentFrame - activeKfForDrag.startFrame : 0;
+                    const resolvedVerts = resolveVerticesAtFrame(stroke.vertices, localFrameForDrag);
+                    const hit = hitTestAnchor(coords, resolvedVerts, 12);
+                    if (hit) {
+                        saveUndoState();
+                        // Select this vertex
+                        if (e.shiftKey) {
+                            // Multi-select
+                            setSelectedVertexIds(prev =>
+                                prev.includes(hit.vertexId)
+                                    ? prev.filter(id => id !== hit.vertexId)
+                                    : [...prev, hit.vertexId]
+                            );
+                        } else {
+                            setSelectedVertexIds([hit.vertexId]);
+                        }
+                        // Build baselines for all vertices involved in this drag
+                        const dragVertexIds = (e.shiftKey || selectedVertexIds.includes(hit.vertexId))
+                            ? Array.from(new Set([...selectedVertexIds, hit.vertexId]))
+                            : [hit.vertexId];
+                        const baselines = {};
+                        stroke.vertices.forEach(v => {
+                            if (dragVertexIds.includes(v.id)) {
+                                baselines[v.id] = getVertexAtFrame(v, localFrameForDrag);
+                            }
+                        });
+                        // Start dragging
+                        vectorDragRef.current = {
+                            active: true,
+                            strokeIndex: vectorEditStrokeIndex,
+                            vertexId: hit.vertexId,
+                            part: hit.part,
+                            startCoords: coords,
+                            altKey: e.altKey,
+                            localFrame: localFrameForDrag,
+                            keyframeId: activeKfForDrag?.id,
+                            baselines
+                        };
+                        renderAnnotations(currentFrame);
+                        return;
+                    }
+
+                    // Click outside the vector stroke — exit direct select mode
+                    const resolvedStroke = { ...stroke, vertices: resolvedVerts };
+                    if (!hitTestVectorStroke(coords, resolvedStroke)) {
+                        setVectorEditStrokeIndex(-1);
+                        setSelectedVertexIds([]);
+                        setPenToolActive(false);
+                        // Don't return — fall through to normal selection logic
+                    }
+                }
+
+                // --- DOUBLE-CLICK: Enter vector direct selection mode ---
+                // (We detect double-click via e.detail === 2)
+                const activeKfHit = getActiveKeyframe(activeLayerId, currentFrame);
+                const localFrameHit = activeKfHit ? currentFrame - activeKfHit.startFrame : 0;
+                if (e.detail === 2) {
+                    for (let i = currentStrokes.length - 1; i >= 0; i--) {
+                        const stroke = currentStrokes[i];
+                        if (stroke.type !== 'vector') continue;
+                        const resolvedStroke = { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, localFrameHit) };
+                        if (hitTestVectorStroke(coords, resolvedStroke)) {
+                            setVectorEditStrokeIndex(i);
+                            // Select all vertices
+                            setSelectedVertexIds(stroke.vertices.map(v => v.id));
+                            setPenToolActive(true); // enables handle rendering
+                            renderAnnotations(currentFrame);
+                            return;
+                        }
+                    }
+                }
+
                 for (let i = currentStrokes.length - 1; i >= 0; i--) {
                     const stroke = currentStrokes[i];
-                    if (isPointInStroke(coords, stroke)) {
+                    // Hit-test against the resolved (animated) shape, not the base shape
+                    const hitStroke = (stroke.type === 'vector')
+                        ? { ...stroke, vertices: resolveVerticesAtFrame(stroke.vertices, localFrameHit) }
+                        : stroke;
+                    if (isPointInStroke(coords, hitStroke)) {
                         sel.active = true;
                         sel.indices = [i];
                         sel.originalStrokes = JSON.parse(JSON.stringify([stroke]));
-                        sel.bounds = getStrokesBounds(sel.originalStrokes);
+                        sel.bounds = getStrokesBounds(stroke.type === 'vector' ? [hitStroke] : sel.originalStrokes);
                         sel.transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 };
                         setSelectionActive(true);
                         sel.pendingStrokes = null;
@@ -1216,6 +1705,16 @@ export default function App() {
                         return;
                     }
                 }
+            }
+
+            // --- SCULPT BRUSHES ---
+            if (selectedTool.startsWith('sculpt')) {
+                saveUndoState();
+                setVectorEditStrokeIndex(-1);
+                setSelectedVertexIds([]);
+                isDrawingRef.current = true;
+                lastDrawPosition.current = coords;
+                return;
             }
 
             sel.active = false;
@@ -1236,7 +1735,7 @@ export default function App() {
     const handleMouseMove = (e) => {
         // --- CRITICAL OPTIMIZATION: DIRECT DOM MANIPULATION FOR CURSOR ---
         // Update cursor position directly without React State
-        if (cursorRef.current && selectedTool !== 'hand' && selectedTool !== 'select' && selectedTool !== 'text' && selectedTool !== 'pointer' && !isPanning) {
+        if (cursorRef.current && selectedTool !== 'hand' && selectedTool !== 'select' && selectedTool !== 'text' && selectedTool !== 'pointer' && selectedTool !== 'pen' && selectedTool !== 'vertex' && !isPanning) {
             cursorRef.current.style.transform = `translate3d(${e.clientX}px, ${e.clientY}px, 0) translate(-50%, -50%)`;
             cursorRef.current.style.display = 'block';
         } else if (cursorRef.current) {
@@ -1248,6 +1747,144 @@ export default function App() {
             const dy = e.clientY - lastPanPosition.current.y;
             setViewTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
             lastPanPosition.current = { x: e.clientX, y: e.clientY };
+            return;
+        }
+
+        // --- PEN TOOL HANDLE DRAG ---
+        const penState = penToolStateRef.current;
+        if (penState.isDraggingHandle && penState.isActive) {
+            const coords = getCanvasCoordinates(e, cachedRectRef.current);
+            if (!coords) return;
+            const currentKf = getActiveKeyframe(activeLayerId, currentFrame);
+            if (!currentKf) return;
+            const stroke = currentKf.strokes.find(s => s._penId === penState.strokeId);
+            if (!stroke) return;
+            const vertex = stroke.vertices.find(v => v.id === penState.lastVertexId);
+            if (!vertex) return;
+
+            // Set handleOut to cursor, mirror handleIn
+            vertex.handleOut = { x: coords.x, y: coords.y };
+            vertex.handleIn = {
+                x: 2 * vertex.anchor.x - coords.x,
+                y: 2 * vertex.anchor.y - coords.y
+            };
+
+            if (!drawingAnimationFrameRef.current) {
+                drawingAnimationFrameRef.current = requestAnimationFrame(() => {
+                    renderAnnotations(currentFrame);
+                    drawingAnimationFrameRef.current = null;
+                });
+            }
+            return;
+        }
+
+        // --- VECTOR DIRECT SELECTION DRAG (records anim keys) ---
+        const vDrag = vectorDragRef.current;
+        if (vDrag.active) {
+            const coords = getCanvasCoordinates(e, cachedRectRef.current);
+            if (!coords) return;
+            const currentKf = getActiveKeyframe(activeLayerId, currentFrame);
+            if (!currentKf) return;
+            const stroke = currentKf.strokes[vDrag.strokeIndex];
+            if (!stroke || stroke.type !== 'vector') return;
+            const vertex = stroke.vertices.find(v => v.id === vDrag.vertexId);
+            if (!vertex) return;
+
+            // Use baseline + total delta from drag start (NOT incremental)
+            const dx = coords.x - vDrag.startCoords.x;
+            const dy = coords.y - vDrag.startCoords.y;
+            const localFrame = vDrag.localFrame ?? 0;
+
+            // Helper: write either base values or anim key for an edited vertex
+            const applyVertexEdit = (v, anchor, handleIn, handleOut) => {
+                if (localFrame === 0 && (!v.animKeys || v.animKeys.length === 0)) {
+                    // Static edit at frame 0 - update base values directly
+                    v.anchor = anchor;
+                    v.handleIn = handleIn;
+                    v.handleOut = handleOut;
+                } else {
+                    setVertexAnimKey(v, localFrame, anchor, handleIn, handleOut);
+                }
+            };
+
+            if (vDrag.part === 'anchor') {
+                // Move anchor + both handles together; multi-vertex if applicable
+                const dragVertexIds = vDrag.baselines
+                    ? Object.keys(vDrag.baselines)
+                    : (selectedVertexIds.includes(vDrag.vertexId) ? selectedVertexIds : [vDrag.vertexId]);
+                stroke.vertices.forEach(v => {
+                    if (!dragVertexIds.includes(v.id)) return;
+                    const base = vDrag.baselines?.[v.id] || getVertexAtFrame(v, localFrame);
+                    const newAnchor = { x: base.anchor.x + dx, y: base.anchor.y + dy };
+                    const newHandleIn = { x: base.handleIn.x + dx, y: base.handleIn.y + dy };
+                    const newHandleOut = { x: base.handleOut.x + dx, y: base.handleOut.y + dy };
+                    applyVertexEdit(v, newAnchor, newHandleIn, newHandleOut);
+                });
+            } else if (vDrag.part === 'handleOut') {
+                const base = vDrag.baselines?.[vertex.id] || getVertexAtFrame(vertex, localFrame);
+                const newAnchor = { ...base.anchor };
+                const newHandleOut = { x: coords.x, y: coords.y };
+                const newHandleIn = vDrag.altKey
+                    ? { ...base.handleIn }
+                    : { x: 2 * newAnchor.x - newHandleOut.x, y: 2 * newAnchor.y - newHandleOut.y };
+                applyVertexEdit(vertex, newAnchor, newHandleIn, newHandleOut);
+            } else if (vDrag.part === 'handleIn') {
+                const base = vDrag.baselines?.[vertex.id] || getVertexAtFrame(vertex, localFrame);
+                const newAnchor = { ...base.anchor };
+                const newHandleIn = { x: coords.x, y: coords.y };
+                const newHandleOut = vDrag.altKey
+                    ? { ...base.handleOut }
+                    : { x: 2 * newAnchor.x - newHandleIn.x, y: 2 * newAnchor.y - newHandleIn.y };
+                applyVertexEdit(vertex, newAnchor, newHandleIn, newHandleOut);
+            }
+
+            // NOTE: do NOT update vDrag.startCoords - we always recompute from baseline
+
+            if (!drawingAnimationFrameRef.current) {
+                drawingAnimationFrameRef.current = requestAnimationFrame(() => {
+                    renderAnnotations(currentFrame);
+                    drawingAnimationFrameRef.current = null;
+                });
+            }
+            return;
+        }
+
+        // --- SCULPT BRUSHES DRAG ---
+        if (isDrawingRef.current && selectedTool.startsWith('sculpt')) {
+            const coords = getCanvasCoordinates(e, cachedRectRef.current);
+            if (!coords) return;
+            const currentKf = getActiveKeyframe(activeLayerId, currentFrame);
+            if (!currentKf) return;
+
+            const dx = coords.x - lastDrawPosition.current.x;
+            const dy = coords.y - lastDrawPosition.current.y;
+            const radius = brushSize; // Brush size defines falloff radius
+
+            let strokesModified = false;
+
+            currentKf.strokes.forEach(stroke => {
+                if (stroke.type === 'vector' && stroke.vertices && stroke.vertices.length > 0) {
+                    if (selectedTool === 'sculpt-grab') {
+                        stroke.vertices = bakeTransforms(applySculptGrab(stroke.vertices, lastDrawPosition.current, { x: dx, y: dy }, radius));
+                        strokesModified = true;
+                    } else if (selectedTool === 'sculpt-push') {
+                        stroke.vertices = bakeTransforms(applySculptPush(stroke.vertices, lastDrawPosition.current, { x: dx, y: dy }, radius, 0.5));
+                        strokesModified = true;
+                    } else if (selectedTool === 'sculpt-pull') {
+                        stroke.vertices = bakeTransforms(applySculptPull(stroke.vertices, coords, radius, 0.2));
+                        strokesModified = true;
+                    }
+                }
+            });
+
+            lastDrawPosition.current = coords;
+
+            if (strokesModified && !drawingAnimationFrameRef.current) {
+                drawingAnimationFrameRef.current = requestAnimationFrame(() => {
+                    renderAnnotations(currentFrame);
+                    drawingAnimationFrameRef.current = null;
+                });
+            }
             return;
         }
 
@@ -1311,6 +1948,24 @@ export default function App() {
     const handleMouseUp = () => {
         cachedRectRef.current = null;
         if (isPanning) { setIsPanning(false); return; }
+
+        // --- VECTOR DIRECT SELECTION DRAG END ---
+        const vDrag = vectorDragRef.current;
+        if (vDrag.active) {
+            vDrag.active = false;
+            updateKeyframes([...keyframesRef.current]);
+            renderAnnotations(currentFrame);
+            return;
+        }
+
+        // --- PEN TOOL HANDLE RELEASE ---
+        const penState = penToolStateRef.current;
+        if (penState.isDraggingHandle) {
+            penState.isDraggingHandle = false;
+            renderAnnotations(currentFrame);
+            // Don't return — let the path stay active for the next click
+            return;
+        }
 
         const sel = selectionRef.current;
 
@@ -1409,10 +2064,29 @@ export default function App() {
 
                 sel.indices.forEach((strokeIndex, i) => {
                     const original = sel.originalStrokes[i];
-                    const transformedPoints = original.points.map(p => getTransformedPoint(p, center, t));
-                    if (currentStrokes[strokeIndex]) {
-                        currentStrokes[strokeIndex].points = transformedPoints;
-                        currentStrokes[strokeIndex].size = Math.max(1, original.size * avgScale);
+                    if (original.type === 'vector') {
+                        const transformedVertices = original.vertices.map(v => ({
+                            ...v,
+                            anchor: getTransformedPoint(v.anchor, center, t),
+                            handleIn: getTransformedPoint(v.handleIn, center, t),
+                            handleOut: getTransformedPoint(v.handleOut, center, t),
+                            // Also transform every anim key so animations stay in sync
+                            animKeys: v.animKeys ? v.animKeys.map(k => ({
+                                frameOffset: k.frameOffset,
+                                anchor: getTransformedPoint(k.anchor, center, t),
+                                handleIn: getTransformedPoint(k.handleIn, center, t),
+                                handleOut: getTransformedPoint(k.handleOut, center, t),
+                            })) : v.animKeys,
+                        }));
+                        if (currentStrokes[strokeIndex]) {
+                            currentStrokes[strokeIndex].vertices = transformedVertices;
+                        }
+                    } else {
+                        const transformedPoints = original.points.map(p => getTransformedPoint(p, center, t));
+                        if (currentStrokes[strokeIndex]) {
+                            currentStrokes[strokeIndex].points = transformedPoints;
+                            currentStrokes[strokeIndex].size = Math.max(1, original.size * avgScale);
+                        }
                     }
                 });
 
@@ -1849,6 +2523,42 @@ export default function App() {
         updateKeyframes([...keyframesRef.current]);
     };
 
+    const onMoveAnimKeys = (animKeySelection, deltaFrames) => {
+        if (deltaFrames === 0) return;
+        saveUndoState();
+        // Group selected markers by kfId
+        const byKf = {};
+        animKeySelection.forEach(({ kfId, frameOffset }) => {
+            if (!byKf[kfId]) byKf[kfId] = new Set();
+            byKf[kfId].add(frameOffset);
+        });
+        keyframesRef.current.forEach(kf => {
+            const offsetsToMove = byKf[kf.id];
+            if (!offsetsToMove) return;
+            kf.strokes.forEach(stroke => {
+                if (stroke.type !== 'vector' || !stroke.vertices) return;
+                stroke.vertices.forEach(v => {
+                    if (!v.animKeys) return;
+                    v.animKeys.forEach(k => {
+                        if (offsetsToMove.has(k.frameOffset)) {
+                            k.frameOffset = Math.max(0, Math.min(kf.duration - 1, k.frameOffset + deltaFrames));
+                        }
+                    });
+                    v.animKeys.sort((a, b) => a.frameOffset - b.frameOffset);
+                });
+            });
+        });
+        // Update selection to reflect moved positions
+        setSelectedAnimKeys(prev => prev.map(sel => {
+            if (!byKf[sel.kfId]?.has(sel.frameOffset)) return sel;
+            const kf = keyframesRef.current.find(k => k.id === sel.kfId);
+            if (!kf) return sel;
+            return { ...sel, frameOffset: Math.max(0, Math.min(kf.duration - 1, sel.frameOffset + deltaFrames)) };
+        }));
+        updateKeyframes([...keyframesRef.current]);
+        renderAnnotations(currentFrame);
+    };
+
     const addLayer = () => {
         const newLayer = { id: `layer-${Date.now()}`, name: `Layer ${layers.length + 1}`, visible: true, locked: false, opacity: 1 };
         setLayers([newLayer, ...layers]);
@@ -1933,9 +2643,39 @@ export default function App() {
         return () => cancelAnimationFrame(animationFrameRef.current);
     }, [isPlaying, currentFrame, rangeStart, rangeEnd, isRangeActive]);
 
+    // --- PEN TOOL FINALIZATION ---
+    const finalizePenPath = useCallback(() => {
+        const penState = penToolStateRef.current;
+        if (!penState.isActive) return;
+        penState.isActive = false;
+        penState.strokeId = null;
+        penState.lastVertexId = null;
+        penState.isDraggingHandle = false;
+        setPenToolActive(false);
+        setSelectedVertexIds([]);
+        renderAnnotations(currentFrame);
+    }, [currentFrame, renderAnnotations]);
+
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            // Escape key — finalize pen path or deselect
+            if (e.key === 'Escape') {
+                const penState = penToolStateRef.current;
+                if (penState.isActive) {
+                    finalizePenPath();
+                    return;
+                }
+                // Also exit vector direct selection mode
+                if (vectorEditStrokeIndex >= 0) {
+                    setVectorEditStrokeIndex(-1);
+                    setSelectedVertexIds([]);
+                    setPenToolActive(false);
+                    renderAnnotations(currentFrame);
+                    return;
+                }
+            }
 
             if (e.code === 'Space') {
                 e.preventDefault();
@@ -1944,12 +2684,40 @@ export default function App() {
             if (e.code === 'ArrowRight') stepFrame(1);
             if (e.code === 'ArrowLeft') stepFrame(-1);
             if (e.key === 'Delete' || e.key === 'Backspace') {
+                // If in vector edit mode with selected vertices, delete those vertices
+                if (vectorEditStrokeIndex >= 0 && selectedVertexIds.length > 0) {
+                    const currentKf = getActiveKeyframe(activeLayerId, currentFrame);
+                    if (currentKf && currentKf.strokes[vectorEditStrokeIndex]?.type === 'vector') {
+                        saveUndoState();
+                        const stroke = currentKf.strokes[vectorEditStrokeIndex];
+                        stroke.vertices = stroke.vertices.filter(v => !selectedVertexIds.includes(v.id));
+                        if (stroke.vertices.length === 0) {
+                            // Remove the entire stroke if no vertices remain
+                            currentKf.strokes.splice(vectorEditStrokeIndex, 1);
+                            setVectorEditStrokeIndex(-1);
+                            setPenToolActive(false);
+                        }
+                        setSelectedVertexIds([]);
+                        updateKeyframes([...keyframesRef.current]);
+                        renderAnnotations(currentFrame);
+                        return;
+                    }
+                }
                 clearCurrentFrame();
+            }
+
+            // P key for Pen tool shortcut
+            if (e.key === 'p' || e.key === 'P') {
+                setSelectedTool('pen');
+            }
+            // A key for Vertex tool shortcut
+            if (e.key === 'a' || e.key === 'A') {
+                setSelectedTool('vertex');
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isPlaying, currentFrame, isPanning]);
+    }, [isPlaying, currentFrame, isPanning, finalizePenPath, vectorEditStrokeIndex, selectedVertexIds]);
 
     const frameHasData = getActiveKeyframe(activeLayerId, currentFrame) !== undefined;
 
@@ -1964,7 +2732,12 @@ export default function App() {
             <div
                 ref={cursorRef}
                 className="fixed pointer-events-none z-[100] hidden border border-white rounded-full mix-blend-difference"
-                style={{ width: brushSize, height: brushSize, transform: 'translate(-50%, -50%)', backgroundColor: 'rgba(255,255,255,0.2)' }}
+                style={{
+                    width: selectedTool.startsWith('sculpt') ? brushSize * 2 : brushSize,
+                    height: selectedTool.startsWith('sculpt') ? brushSize * 2 : brushSize,
+                    transform: 'translate(-50%, -50%)',
+                    backgroundColor: 'rgba(255,255,255,0.2)'
+                }}
             />
             {/* --- HEADER --- */}
             <div className="h-12 border-b border-neutral-800 bg-neutral-900 flex items-center px-4 justify-between shrink-0 z-50">
@@ -2011,6 +2784,21 @@ export default function App() {
                     </button>
                     <button onClick={() => setSelectedTool('select')} className={`p-2 rounded-lg transition-all ${selectedTool === 'select' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Select (S)">
                         <BoxSelect size={20} />
+                    </button>
+                    <button onClick={() => { setSelectedTool('pen'); }} className={`p-2 rounded-lg transition-all ${selectedTool === 'pen' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Pen Tool (P)">
+                        <Spline size={20} />
+                    </button>
+                    <button onClick={() => { setSelectedTool('vertex'); }} className={`p-2 rounded-lg transition-all ${selectedTool === 'vertex' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Vertex Tool (A)">
+                        <Crosshair size={20} />
+                    </button>
+                    <button onClick={() => setSelectedTool('sculpt-grab')} className={`p-2 rounded-lg transition-all ${selectedTool === 'sculpt-grab' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Sculpt Grab">
+                        <HandGrab size={20} />
+                    </button>
+                    <button onClick={() => setSelectedTool('sculpt-push')} className={`p-2 rounded-lg transition-all ${selectedTool === 'sculpt-push' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Sculpt Push">
+                        <CircleDot size={20} />
+                    </button>
+                    <button onClick={() => setSelectedTool('sculpt-pull')} className={`p-2 rounded-lg transition-all ${selectedTool === 'sculpt-pull' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Sculpt Pull">
+                        <Magnet size={20} />
                     </button>
                     <button onClick={() => setSelectedTool('hand')} className={`p-2 rounded-lg transition-all ${selectedTool === 'hand' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`} title="Hand (H)">
                         <Hand size={20} />
@@ -2175,6 +2963,9 @@ export default function App() {
                 isPlaying={isPlaying}
                 selectedKeyframeIds={selectedKeyframeIds}
                 onSelectKeyframes={setSelectedKeyframeIds}
+                selectedAnimKeys={selectedAnimKeys}
+                onSelectAnimKeys={setSelectedAnimKeys}
+                onMoveAnimKeys={onMoveAnimKeys}
             />
         </div >
     );
