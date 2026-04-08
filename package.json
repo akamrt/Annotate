@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@babylonjs/core": "^9.1.0",
     "lucide-react": "^0.556.0",
     "react": "^19.2.0",
     "react-colorful": "^5.6.1",
@@ -27,6 +28,7 @@
     "globals": "^16.5.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.16",
+    "typescript": "^6.0.2",
     "vite": "^7.2.4"
   }
 }
