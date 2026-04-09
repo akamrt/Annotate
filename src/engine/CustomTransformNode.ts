@@ -182,9 +182,15 @@ export class CustomTransformNode extends TransformNode {
    * native TRS properties. Must be called before rendering.
    */
   syncToBabylon(): void {
-    // 0. Bidirectional Sync: Check if Babylon's native properties were modified externally (e.g. by a Gizmo)
+    // 0. Bidirectional Sync: Check if Babylon's native properties were modified externally
     const posChanged = !this.position.equals(this._lastSyncedPosition);
-    const rotChanged = this.rotationQuaternion && !this.rotationQuaternion.equals(this._lastSyncedRot);
+    
+    // Some Gizmos strip rotationQuaternion to fallback to .rotation. Safely fetch effective quaternion.
+    let effRotQuat = this.rotationQuaternion;
+    if (!effRotQuat) {
+        effRotQuat = Quaternion.RotationYawPitchRoll(this.rotation.y, this.rotation.x, this.rotation.z);
+    }
+    const rotChanged = !effRotQuat.equals(this._lastSyncedRot);
     const scaleChanged = !this.scaling.equals(this._lastSyncedScale);
     
     if (posChanged || rotChanged || scaleChanged) {
@@ -193,9 +199,8 @@ export class CustomTransformNode extends TransformNode {
         this.translateY = this.position.y;
         this.translateZ = this.position.z;
       }
-      if (rotChanged && this.rotationQuaternion) {
-        // Explicitly get generic Euler angles from changing rotation quaternion
-        const euler = this.rotationQuaternion.toEulerAngles();
+      if (rotChanged) {
+        const euler = effRotQuat.toEulerAngles();
         this.rotateX = euler.x;
         this.rotateY = euler.y;
         this.rotateZ = euler.z;
@@ -235,7 +240,12 @@ export class CustomTransformNode extends TransformNode {
     
     // Track for bidirectional sync
     this._lastSyncedPosition.copyFrom(this.position);
-    if (this.rotationQuaternion) this._lastSyncedRot.copyFrom(this.rotationQuaternion);
+    
+    // Ensure rotationQuaternion is initialized before copying
+    if (!this.rotationQuaternion) {
+        this.rotationQuaternion = Quaternion.Identity();
+    }
+    this._lastSyncedRot.copyFrom(this.rotationQuaternion);
     this._lastSyncedScale.copyFrom(this.scaling);
 
     // 5. Update tracking

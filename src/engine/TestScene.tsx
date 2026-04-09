@@ -115,6 +115,7 @@ export default function TestScene({ onClose }: TestSceneProps) {
   // Selection state
   const [selectedNode, setSelectedNode] = useState<CustomTransformNode | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const selectedNodeRef = useRef<CustomTransformNode | null>(null);
 
   // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -166,9 +167,47 @@ export default function TestScene({ onClose }: TestSceneProps) {
     gizmoManager.positionGizmoEnabled = true;
     gizmoManager.rotationGizmoEnabled = true;
     gizmoManager.scaleGizmoEnabled = true;
-    // Don't auto-attach, we handle it explicitly based on selection
     gizmoManager.usePointerToAttachGizmos = false;
     gizmoManagerRef.current = gizmoManager;
+
+    // Wire rotation gizmo drag events to our custom channels.
+    // We read from selectedNodeRef (a ref) so the closure always sees
+    // the latest selected node, not the initial null.
+    if (gizmoManager.gizmos.rotationGizmo) {
+      const rotG = gizmoManager.gizmos.rotationGizmo;
+      let startX = 0, startY = 0, startZ = 0;
+
+      if (rotG.xGizmo) {
+        rotG.xGizmo.dragBehavior.onDragStartObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) startX = n.rotateX;
+        });
+        rotG.xGizmo.dragBehavior.onDragObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('rotateX', startX + rotG.xGizmo.angle); }
+        });
+      }
+      if (rotG.yGizmo) {
+        rotG.yGizmo.dragBehavior.onDragStartObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) startY = n.rotateY;
+        });
+        rotG.yGizmo.dragBehavior.onDragObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('rotateY', startY + rotG.yGizmo.angle); }
+        });
+      }
+      if (rotG.zGizmo) {
+        rotG.zGizmo.dragBehavior.onDragStartObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) startZ = n.rotateZ;
+        });
+        rotG.zGizmo.dragBehavior.onDragObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('rotateZ', startZ + rotG.zGizmo.angle); }
+        });
+      }
+    }
 
     // Camera
     const camera = new ArcRotateCamera(
@@ -351,6 +390,17 @@ export default function TestScene({ onClose }: TestSceneProps) {
     // Viewport Picking (Selection)
     scene.onPointerObservable.add((pointerInfo) => {
       if (pointerInfo.type === PointerEventTypes.POINTERDOWN && pointerInfo.event.button === 0) {
+        // Prevent deselection if the user is interacting with the Gizmo handles directly.
+        const gm = gizmoManagerRef.current;
+        if (
+          gm?.isHovered ||
+          gm?.gizmos.positionGizmo?.isHovered ||
+          gm?.gizmos.rotationGizmo?.isHovered ||
+          gm?.gizmos.scaleGizmo?.isHovered
+        ) {
+          return;
+        }
+
         if (pointerInfo.pickInfo?.hit && pointerInfo.pickInfo.pickedMesh) {
           const mesh = pointerInfo.pickInfo.pickedMesh;
           let currentParent = mesh.parent;
@@ -393,6 +443,9 @@ export default function TestScene({ onClose }: TestSceneProps) {
 
   // ---- Sync Selection to Babylon Visuals & UI Re-renders ----
   useEffect(() => {
+    // Keep the ref in sync so gizmo callbacks always see the current node
+    selectedNodeRef.current = selectedNode;
+
     const hl = highlightLayerRef.current;
     const gm = gizmoManagerRef.current;
     
