@@ -995,10 +995,6 @@ export default function TestScene({ onClose }: TestSceneProps) {
     }
     wireCustomGizmos();
   }, []);
-    
-    // Force UI tick to show the keys (if we add UI indicators later)
-    setTick(t => t + 1);
-  }, [currentFrame]);
 
   const checkAnimState = useCallback((channel: string) => {
     if (!selectedNode || !evaluatorRef.current || evaluatorRef.current.clips.length === 0) return { hasCurve: false, isKeyed: false };
