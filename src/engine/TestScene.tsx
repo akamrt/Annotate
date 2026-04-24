@@ -49,6 +49,8 @@ import AttributeEditor from './ui/AttributeEditor';
 import Timeline from './ui/Timeline';
 import { T } from './ui/theme';
 import { TransformOp } from './types';
+import { TransformModeToggle, type TransformMode, type RotateMode } from './ui/GimbalModeToggle';
+import { GizmoModeManager } from './GizmoModeManager';
 
 // ---------------------------------------------------------------------------
 // Simple Look-At Constraint (for demo)
@@ -115,6 +117,7 @@ export default function TestScene({ onClose }: TestSceneProps) {
   const nodesRef = useRef<CustomTransformNode[]>([]);
   const highlightLayerRef = useRef<HighlightLayer | null>(null);
   const gizmoManagerRef = useRef<GizmoManager | null>(null);
+  const gizmoModeManagerRef = useRef<GizmoModeManager | null>(null);
   const noiseLayerRef = useRef<NoiseLayer | null>(null);
 
   // Selection state
@@ -133,6 +136,10 @@ export default function TestScene({ onClose }: TestSceneProps) {
 
   // Right panel tab
   const [rightTab, setRightTab] = useState<'channels' | 'attributes'>('channels');
+
+  // Transform mode (move/rotate/scale)
+  const [transformMode, setTransformMode] = useState<TransformMode>('move');
+  const [rotateMode, setRotateMode] = useState<RotateMode>('world');
 
   // Force re-render for channel box updates
   const [tick, setTick] = useState(0);
@@ -205,6 +212,10 @@ export default function TestScene({ onClose }: TestSceneProps) {
     gizmoManager.scaleGizmoEnabled = false;
     gizmoManager.usePointerToAttachGizmos = false;
     gizmoManagerRef.current = gizmoManager;
+
+    // Gizmo Mode Manager (handles Local/World/Gimbal rotation modes)
+    const gizmoModeManager = new GizmoModeManager(scene, gizmoManager);
+    gizmoModeManagerRef.current = gizmoModeManager;
 
     // Enable native XYZ orthogonal planar squares for translation
     if (gizmoManager.gizmos.positionGizmo) {
@@ -756,16 +767,19 @@ export default function TestScene({ onClose }: TestSceneProps) {
       if (kbInfo.type === 1) { // 1 = KeyboardEventTypes.KEYDOWN
         const key = kbInfo.event.key.toLowerCase();
         if (key === 'w') {
+          setTransformMode('move');
           gizmoManager.positionGizmoEnabled = true;
           gizmoManager.rotationGizmoEnabled = false;
           gizmoManager.scaleGizmoEnabled = false;
           wireCustomGizmos();
         } else if (key === 'e') {
+          setTransformMode('rotate');
           gizmoManager.positionGizmoEnabled = false;
           gizmoManager.rotationGizmoEnabled = true;
           gizmoManager.scaleGizmoEnabled = false;
           wireCustomGizmos();
         } else if (key === 'r') {
+          setTransformMode('scale');
           gizmoManager.positionGizmoEnabled = false;
           gizmoManager.rotationGizmoEnabled = false;
           gizmoManager.scaleGizmoEnabled = true;
@@ -947,6 +961,40 @@ export default function TestScene({ onClose }: TestSceneProps) {
         binding.curve.addKey(createKeyframe(frame, val, TangentMode.Spline));
       }
     }
+
+    // Update gizmo mode manager rotation mode when node's rotation order changes
+    if (gizmoModeManagerRef.current) {
+      gizmoModeManagerRef.current.setRotateMode(rotateMode);
+    }
+  }, [currentFrame, rotateMode]);
+
+  const handleRotateModeChange = useCallback((mode: RotateMode) => {
+    setRotateMode(mode);
+    if (gizmoModeManagerRef.current) {
+      gizmoModeManagerRef.current.setRotateMode(mode);
+    }
+  }, []);
+
+  const handleTransformModeChange = useCallback((mode: TransformMode) => {
+    setTransformMode(mode);
+    const gm = gizmoManagerRef.current;
+    if (!gm) return;
+    
+    if (mode === 'move') {
+      gm.positionGizmoEnabled = true;
+      gm.rotationGizmoEnabled = false;
+      gm.scaleGizmoEnabled = false;
+    } else if (mode === 'rotate') {
+      gm.positionGizmoEnabled = false;
+      gm.rotationGizmoEnabled = true;
+      gm.scaleGizmoEnabled = false;
+    } else if (mode === 'scale') {
+      gm.positionGizmoEnabled = false;
+      gm.rotationGizmoEnabled = false;
+      gm.scaleGizmoEnabled = true;
+    }
+    wireCustomGizmos();
+  }, []);
     
     // Force UI tick to show the keys (if we add UI indicators later)
     setTick(t => t + 1);
@@ -1015,6 +1063,15 @@ export default function TestScene({ onClose }: TestSceneProps) {
             Transform · Animation · Constraints
           </span>
         </div>
+
+        {/* Transform Mode Toggle */}
+        <TransformModeToggle
+          currentMode={transformMode}
+          onModeChange={handleTransformModeChange}
+          rotateMode={rotateMode}
+          onRotateModeChange={handleRotateModeChange}
+        />
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {/* Frame pill */}
           <span style={{
