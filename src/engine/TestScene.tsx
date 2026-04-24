@@ -318,222 +318,161 @@ export default function TestScene({ onClose }: TestSceneProps) {
         styleOrthogonalPlane(posG.zPlaneGizmo);
       }
 
-      if (gizmoManager.gizmos.rotationGizmo) {
-        const rotG = gizmoManager.gizmos.rotationGizmo;
-        
-        // Remove previous custom observers to prevent duplicate firing if called arbitrarily
-        // NOTE: We DO NOT clear() the entire observable, because Babylon's internal 
-        // PlaneRotationGizmo logic uses it to compute the 'angle' property!
-        if (!(rotG as any)._customWired) {
-          // ---------------------------------------------------------------
-          // WORLD-SPACE GIZMO ORIENTATION
-          // ---------------------------------------------------------------
-          // Set all three axis gizmos to World space: their rings always
-          // align to world X/Y/Z regardless of the object's local rotation.
-          // This prevents the "snap" when clicking a ring — the gizmo
-          // orientation stays identical before and after grabbing.
-          //
-          // The drag angle is then applied as a world-axis rotation delta
-          // using quaternion math, properly decomposed back to Euler channels.
-          // ---------------------------------------------------------------
+      // ---------------------------------------------------------------
+      // ROTATION GIZMO WIRING — quaternion world-space rotation
+      //
+      // Each gizmo (X/Y/Z axis + screen ring) stores its own observer
+      // state DIRECTLY on the gizmo object as _rotWired. This avoids:
+      //   1. A single flag being set on the wrong gizmo instance
+      //   2. Early returns skipping flag assignment
+      //   3. Duplicate observers from re-wiring
+      // ---------------------------------------------------------------
+      const rotGizmo = gizmoManager.gizmos.rotationGizmo;
+      if (rotGizmo) {
+        const wireRotationGizmos = () => {
+          const rotG = gizmoManager.gizmos.rotationGizmo;
+          if (!rotG) return;
 
-          // Only wire if axis gizmos are ready (when rotationGizmoEnabled is true)
-          if (!rotG.xGizmo || !rotG.yGizmo || !rotG.zGizmo) {
-            console.warn('[GizmoManager] Rotation axis gizmos not ready yet, skipping wire');
-            return;
-          }
+          // Check each axis gizmo independently — wire only if not yet wired
+          const wireAxis = (
+            axis: 'x' | 'y' | 'z',
+            worldAxis: Vector3,
+          ) => {
+            const axisGizmo = axis === 'x' ? rotG.xGizmo : axis === 'y' ? rotG.yGizmo : rotG.zGizmo;
+            if (!axisGizmo) return;
+            if ((axisGizmo as any)._rotWired) return; // Already wired this gizmo
+            (axisGizmo as any)._rotWired = true;
 
-          rotG.xGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-          rotG.yGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-          rotG.zGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+            // Set world-space orientation
+            axisGizmo.updateGizmoRotationToMatchAttachedMesh = false;
 
-          // Shared state: capture the initial local rotation quaternion at drag start.
-          // All three axis gizmos use the same pattern: rotate around a world axis,
-          // then decompose back to Euler channels.
-          let initialRotQuat = new Quaternion();
+            // Capture state in closures bound to THIS specific axis gizmo
+            let initialRotQuat = new Quaternion();
 
-          /**
-           * Helper: apply a world-space rotation delta to the initial local rotation
-           * and write the result back to the node's Euler channels.
-           *
-           * @param worldAxis - The world-space axis to rotate around (e.g. Vector3.Right() for X)
-           * @param angle     - The accumulated drag angle from PlaneRotationGizmo
-           */
-          const applyWorldAxisRotation = (n: CustomTransformNode, worldAxis: Vector3, angle: number) => {
-            // Build the world-space rotation delta
-            const rotDelta = Quaternion.RotationAxis(worldAxis, angle);
-            // Apply delta to the initial rotation: delta * initial (pre-multiply = world space)
-            const newRot = rotDelta.multiply(initialRotQuat);
-            // Decompose to Euler and write to channels
-            const euler = newRot.toEulerAngles();
-            n.setChannel('rotateX', euler.x);
-            n.setChannel('rotateY', euler.y);
-            n.setChannel('rotateZ', euler.z);
-            n.syncToBabylon();
+            axisGizmo.dragBehavior.onDragStartObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (!n) return;
+              n.isDraggingRotation = true;
+              const localMat = n.matrixStack.evaluate();
+              const _s = new Vector3(), _t = new Vector3();
+              localMat.decompose(_s, initialRotQuat, _t);
+            });
+
+            axisGizmo.dragBehavior.onDragObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (!n) return;
+              // angle accumulates total drag since dragStart (Babylon handles this)
+              const rotDelta = Quaternion.RotationAxis(worldAxis, axisGizmo.angle);
+              const newRot = rotDelta.multiply(initialRotQuat);
+              const euler = newRot.toEulerAngles();
+              n.setChannel('rotateX', euler.x);
+              n.setChannel('rotateY', euler.y);
+              n.setChannel('rotateZ', euler.z);
+              n.syncToBabylon();
+            });
+
+            axisGizmo.dragBehavior.onDragEndObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) {
+                n.isDraggingRotation = false;
+                n.syncToBabylon();
+              }
+            });
           };
 
-          const captureInitialRotation = (n: CustomTransformNode) => {
-            n.isDraggingRotation = true;
-            // Cache the exact starting local rotation as a quaternion from the matrix stack
-            const localMat = n.matrixStack.evaluate();
-            const _s = new Vector3(), _t = new Vector3();
-            localMat.decompose(_s, initialRotQuat, _t);
-          };
+          wireAxis('x', Vector3.Right());
+          wireAxis('y', Vector3.Up());
+          wireAxis('z', Vector3.Forward());
 
-          const finishDrag = (n: CustomTransformNode) => {
-            n.isDraggingRotation = false;
-            n.syncToBabylon();
-          };
+          // --- Screen-space (Maya-style) rotation ring ---
+          if (!(rotG as any)._screenRingWired) {
+            (rotG as any)._screenRingWired = true;
 
-          // --- Maya Screen Space Rotation Ring ---
-          if (!(rotG as any)._cameraSpaceRotationGizmo) {
-            // The ring's local plane normal is (0,0,1). We aim that normal at the camera
-            // using a simple LookAt with a stable world-up vector — no roll artifacts.
-            const screenRing = new PlaneRotationGizmo(new Vector3(0, 0, 1), Color3.FromHexString("#00ffff"), gizmoManager.utilityLayer);
-            
-            const proxyNode = new TransformNode("screenRingProxy", scene);
-            proxyNode.rotationQuaternion = new Quaternion();
+            const screenRing = new PlaneRotationGizmo(
+              new Vector3(0, 0, 1),
+              Color3.FromHexString('#00ffff'),
+              gizmoManager.utilityLayer,
+            );
+
+            const proxyNode = new TransformNode('screenRingProxy', scene);
+            proxyNode.rotationQuaternion = Quaternion.Identity();
             screenRing.attachedNode = proxyNode;
-            
-            // MUST be true so Babylon's internal drag math transforms the plane normal
-            // by proxyNode's rotation — aligning the drag plane to the camera aim direction.
             screenRing.updateGizmoRotationToMatchAttachedMesh = true;
             screenRing.scaleRatio = 1.35;
-            
-            // Reusable temp matrix
+
             const _lookAtMat = new Matrix();
-            
-            // Guard: freeze alignment during drag so Babylon's internal angle
-            // accumulator isn't corrupted by our callback overwriting the proxyNode.
             let isDraggingScreenRing = false;
-            
-            // Every frame: aim the proxyNode's +Z at the camera using a stable LookAt
+            let screenRingInitialQuat = new Quaternion();
+            let aimAxis = new Vector3();
+
+            // Every frame: aim proxyNode +Z at camera
             scene.onBeforeRenderObservable.add(() => {
-              if (isDraggingScreenRing) return; // Don't fight Babylon during drag
+              if (isDraggingScreenRing) return;
               if (selectedNodeRef.current && scene.activeCamera) {
                 const objPos = selectedNodeRef.current.absolutePosition;
                 const camPos = scene.activeCamera.globalPosition;
-                
-                // LookAtLH(eye, target, up): creates a view matrix where +Z points eye→target.
-                // Inverting it gives a world rotation where local +Z = aim direction.
-                // Using Vector3.Up() as the up-vector guarantees NO roll.
                 Matrix.LookAtLHToRef(objPos, camPos, Vector3.Up(), _lookAtMat);
                 _lookAtMat.invert();
                 _lookAtMat.decompose(undefined, proxyNode.rotationQuaternion!, undefined);
-                
-                // Pin position to the selected object
                 proxyNode.position.copyFrom(objPos);
                 proxyNode.computeWorldMatrix(true);
               }
             });
-            
-            // Visibility control: hide/show the ring's root mesh directly
-            // (Do NOT use screenRing.isEnabled — its setter nulls out attachedNode!)
+
+            // Visibility: show only when rotation mode is active
             scene.onBeforeRenderObservable.add(() => {
               const shouldShow = gizmoManager.rotationGizmoEnabled && selectedNodeRef.current !== null;
               if ((screenRing as any)._rootMesh) {
                 (screenRing as any)._rootMesh.setEnabled(shouldShow);
               }
             });
-            
-            // Wire the drag
-            let aimAxis = new Vector3();
 
             screenRing.dragBehavior.onDragStartObservable.add(() => {
-               const n = selectedNodeRef.current;
-               if (n && scene.activeCamera) {
-                 captureInitialRotation(n);
-                 isDraggingScreenRing = true;
-                 
-                 // The rotation axis = the aim vector from object to camera (world space)
-                 // This is the SAME axis the ring's plane normal is aligned to.
-                 aimAxis = scene.activeCamera.globalPosition
-                   .subtract(n.absolutePosition)
-                   .normalize();
-                 
-                 // Transform the world-space aim axis into parent's local space
-                 const parentNode = n.parent as TransformNode;
-                 if (parentNode) {
-                   const invParentWorld = new Matrix();
-                   parentNode.computeWorldMatrix(true).invertToRef(invParentWorld);
-                   Vector3.TransformNormalToRef(aimAxis, invParentWorld, aimAxis);
-                   aimAxis.normalize();
-                 }
-               }
+              const n = selectedNodeRef.current;
+              if (!n || !scene.activeCamera) return;
+              isDraggingScreenRing = true;
+              n.isDraggingRotation = true;
+              const localMat = n.matrixStack.evaluate();
+              const _s = new Vector3(), _t = new Vector3();
+              localMat.decompose(_s, screenRingInitialQuat, _t);
+              aimAxis = scene.activeCamera.globalPosition
+                .subtract(n.absolutePosition)
+                .normalize();
+              const parentNode = n.parent as TransformNode;
+              if (parentNode) {
+                const invParentWorld = new Matrix();
+                parentNode.computeWorldMatrix(true).invertToRef(invParentWorld);
+                Vector3.TransformNormalToRef(aimAxis, invParentWorld, aimAxis);
+                aimAxis.normalize();
+              }
             });
+
             screenRing.dragBehavior.onDragObservable.add(() => {
-               const n = selectedNodeRef.current;
-               if (n) {
-                  // screenRing.angle accumulates the total drag angle since dragStart
-                  const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
-                  const newRot = rotDelta.multiply(initialRotQuat);
-                  
-                  const euler = newRot.toEulerAngles();
-                  n.setChannel('rotateX', euler.x);
-                  n.setChannel('rotateY', euler.y);
-                  n.setChannel('rotateZ', euler.z);
-                  n.syncToBabylon();
-               }
+              const n = selectedNodeRef.current;
+              if (!n) return;
+              const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
+              const newRot = rotDelta.multiply(screenRingInitialQuat);
+              const euler = newRot.toEulerAngles();
+              n.setChannel('rotateX', euler.x);
+              n.setChannel('rotateY', euler.y);
+              n.setChannel('rotateZ', euler.z);
+              n.syncToBabylon();
             });
+
             screenRing.dragBehavior.onDragEndObservable.add(() => {
-               isDraggingScreenRing = false;
-               const n = selectedNodeRef.current;
-               if (n) finishDrag(n);
+              isDraggingScreenRing = false;
+              const n = selectedNodeRef.current;
+              if (n) {
+                n.isDraggingRotation = false;
+                n.syncToBabylon();
+              }
             });
-            
-            (rotG as any)._cameraSpaceRotationGizmo = screenRing;
-          }
 
-          // --- X axis (world space) ---
-          if (rotG.xGizmo) {
-            rotG.xGizmo.dragBehavior.onDragStartObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) captureInitialRotation(n);
-            });
-            rotG.xGizmo.dragBehavior.onDragObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) applyWorldAxisRotation(n, Vector3.Right(), rotG.xGizmo.angle);
-            });
-            rotG.xGizmo.dragBehavior.onDragEndObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) finishDrag(n);
-            });
+            (rotG as any)._screenRing = screenRing;
           }
+        };
 
-          // --- Y axis (world space) ---
-          if (rotG.yGizmo) {
-            rotG.yGizmo.dragBehavior.onDragStartObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) captureInitialRotation(n);
-            });
-            rotG.yGizmo.dragBehavior.onDragObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) applyWorldAxisRotation(n, Vector3.Up(), rotG.yGizmo.angle);
-            });
-            rotG.yGizmo.dragBehavior.onDragEndObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) finishDrag(n);
-            });
-          }
-
-          // --- Z axis (world space) ---
-          if (rotG.zGizmo) {
-            rotG.zGizmo.dragBehavior.onDragStartObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) captureInitialRotation(n);
-            });
-            rotG.zGizmo.dragBehavior.onDragObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) applyWorldAxisRotation(n, Vector3.Forward(), rotG.zGizmo.angle);
-            });
-            rotG.zGizmo.dragBehavior.onDragEndObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) finishDrag(n);
-            });
-          }
-
-          (rotG as any)._customWired = true;
-        }
+        wireRotationGizmos();
       }
 
       // Babylon's AxisScaleGizmo natively fails to scale TransformNodes without bounding boxes.
