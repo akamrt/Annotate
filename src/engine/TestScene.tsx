@@ -336,9 +336,16 @@ export default function TestScene({ onClose }: TestSceneProps) {
           // The drag angle is then applied as a world-axis rotation delta
           // using quaternion math, properly decomposed back to Euler channels.
           // ---------------------------------------------------------------
-          if (rotG.xGizmo) rotG.xGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-          if (rotG.yGizmo) rotG.yGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-          if (rotG.zGizmo) rotG.zGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+
+          // Only wire if axis gizmos are ready (when rotationGizmoEnabled is true)
+          if (!rotG.xGizmo || !rotG.yGizmo || !rotG.zGizmo) {
+            console.warn('[GizmoManager] Rotation axis gizmos not ready yet, skipping wire');
+            return;
+          }
+
+          rotG.xGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+          rotG.yGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+          rotG.zGizmo.updateGizmoRotationToMatchAttachedMesh = false;
 
           // Shared state: capture the initial local rotation quaternion at drag start.
           // All three axis gizmos use the same pattern: rotate around a world axis,
