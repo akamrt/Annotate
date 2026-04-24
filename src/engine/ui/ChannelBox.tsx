@@ -27,10 +27,10 @@ interface ChannelBoxProps {
   width?: number;
   /** Current frame (for display) */
   currentFrame?: number;
-  /** Check if the current channel is keyed on the current frame */
-  checkIsKeyed?: (channel: string) => boolean;
-  /** Handler to set a key on the given channel (or all if undefined) */
-  onSetKey?: (channel?: string) => void;
+  /** Check if the current channel has a curve or is keyed on the current frame */
+  checkAnimState?: (channel: string) => { hasCurve: boolean, isKeyed: boolean };
+  /** Handler to set a key on the given channels (or all if undefined) */
+  onSetKey?: (channels?: string[]) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,17 +43,24 @@ interface ChannelDef {
   color: string;
   precision: number;
 }
-
 function ChannelRow({
   def,
   value,
   onChange,
-  isKeyed,
+  animState,
+  onSetKey,
+  isSelected,
+  onLabelMouseDown,
+  onLabelMouseEnter,
 }: {
   def: ChannelDef;
   value: number;
   onChange: (v: number) => void;
-  isKeyed?: boolean;
+  animState?: { hasCurve: boolean, isKeyed: boolean };
+  onSetKey: () => void;
+  isSelected?: boolean;
+  onLabelMouseDown?: (e: React.MouseEvent) => void;
+  onLabelMouseEnter?: (e: React.MouseEvent) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -119,28 +126,54 @@ function ChannelRow({
         alignItems: 'center',
         height: 22,
         borderBottom: `1px solid ${T.borderDim}`,
+        background: animState?.isKeyed
+          ? (isSelected ? 'rgba(255, 60, 80, 0.55)' : 'rgba(255, 60, 80, 0.35)')
+          : isSelected
+          ? 'rgba(255, 255, 255, 0.15)'
+          : animState?.hasCurve
+          ? 'rgba(255, 80, 100, 0.12)'
+          : 'transparent',
       }}
     >
-      {/* Keyed indicator */}
-      <div style={{
-        width: 14,
-        textAlign: 'center',
-        fontSize: 8,
-        color: isKeyed ? T.keyBezier : 'transparent',
-        flexShrink: 0,
-      }}>
+      {/* Keyed indicator / Set Key button */}
+      <div 
+        onClick={onSetKey}
+        title="Set Keyframe"
+        style={{
+          width: 14,
+          height: 22,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 8,
+          color: animState?.isKeyed ? '#ff3366' : animState?.hasCurve ? '#ff3366aa' : 'rgba(255,255,255,0.1)',
+          flexShrink: 0,
+          cursor: 'pointer',
+        }}
+        onMouseEnter={e => {
+            (e.currentTarget as HTMLElement).style.color = '#ff3366';
+        }}
+        onMouseLeave={e => {
+            (e.currentTarget as HTMLElement).style.color = animState?.isKeyed ? '#ff3366' : animState?.hasCurve ? '#ff3366aa' : 'rgba(255,255,255,0.1)';
+        }}
+      >
         ◆
       </div>
 
       {/* Channel label */}
-      <div style={{
-        width: 80,
-        fontSize: 11,
-        color: T.textDim,
-        paddingLeft: 4,
-        flexShrink: 0,
-        userSelect: 'none',
-      }}>
+      <div 
+        onMouseDown={onLabelMouseDown}
+        onMouseEnter={onLabelMouseEnter}
+        style={{
+          width: 80,
+          fontSize: 11,
+          color: isSelected ? '#fff' : T.textDim,
+          paddingLeft: 4,
+          flexShrink: 0,
+          userSelect: 'none',
+          cursor: 'pointer',
+        }}
+      >
         <span style={{ color: def.color, fontWeight: 500 }}>
           {def.label.slice(-1)}
         </span>
@@ -255,9 +288,67 @@ export default function ChannelBox({
   onChannelChange,
   width = 260,
   currentFrame = 0,
-  checkIsKeyed,
+  checkAnimState,
   onSetKey,
 }: ChannelBoxProps) {
+  
+  const ALL_CHANNELS = React.useMemo(() => [
+    ...TRANSLATE_CHANNELS, ...ROTATE_CHANNELS, ...SCALE_CHANNELS
+  ].map(c => c.channel), []);
+
+  const [selectedChannels, setSelectedChannels] = useState<Set<string>>(new Set());
+  const [lastSelected, setLastSelected] = useState<string | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [dragAction, setDragAction] = useState<'add' | 'remove'>('add');
+
+  useEffect(() => {
+    const handleMouseUp = () => setIsSelecting(false);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => document.removeEventListener('mouseup', handleMouseUp);
+  }, []);
+
+  const handleLabelMouseDown = (e: React.MouseEvent, channel: string) => {
+    e.preventDefault();
+    setIsSelecting(true);
+    let newSel = new Set(selectedChannels);
+    
+    if (e.altKey) {
+      newSel.delete(channel);
+      setDragAction('remove');
+    } else if (e.shiftKey && lastSelected) {
+      const idx1 = ALL_CHANNELS.indexOf(lastSelected);
+      const idx2 = ALL_CHANNELS.indexOf(channel);
+      const start = Math.min(idx1, idx2);
+      const end = Math.max(idx1, idx2);
+      for (let i = start; i <= end; i++) newSel.add(ALL_CHANNELS[i]);
+      setDragAction('add');
+    } else {
+      if (!e.ctrlKey) newSel.clear();
+      newSel.add(channel);
+      setDragAction('add');
+    }
+    
+    setSelectedChannels(newSel);
+    setLastSelected(channel);
+  };
+
+  const handleLabelMouseEnter = (e: React.MouseEvent, channel: string) => {
+    if (!isSelecting) return;
+    let newSel = new Set(selectedChannels);
+    if (dragAction === 'remove') newSel.delete(channel);
+    else newSel.add(channel);
+    setSelectedChannels(newSel);
+    setLastSelected(channel);
+  };
+
+  const handleSetKeyClick = (channel: string) => {
+    if (selectedChannels.has(channel)) {
+      onSetKey?.(Array.from(selectedChannels));
+    } else {
+      onSetKey?.([channel]);
+    }
+  };
+
   if (!selectedNode) {
     return (
       <div style={{
@@ -346,7 +437,11 @@ export default function ChannelBox({
             def={def}
             value={selectedNode.getChannel(def.channel)}
             onChange={handleChange(def.channel)}
-            isKeyed={checkIsKeyed?.(def.channel)}
+            animState={checkAnimState?.(def.channel)}
+            onSetKey={() => handleSetKeyClick(def.channel)}
+            isSelected={selectedChannels.has(def.channel)}
+            onLabelMouseDown={(e) => handleLabelMouseDown(e, def.channel)}
+            onLabelMouseEnter={(e) => handleLabelMouseEnter(e, def.channel)}
           />
         ))}
 
@@ -358,7 +453,11 @@ export default function ChannelBox({
             def={def}
             value={selectedNode.getChannel(def.channel)}
             onChange={handleChange(def.channel)}
-            isKeyed={checkIsKeyed?.(def.channel)}
+            animState={checkAnimState?.(def.channel)}
+            onSetKey={() => handleSetKeyClick(def.channel)}
+            isSelected={selectedChannels.has(def.channel)}
+            onLabelMouseDown={(e) => handleLabelMouseDown(e, def.channel)}
+            onLabelMouseEnter={(e) => handleLabelMouseEnter(e, def.channel)}
           />
         ))}
 
@@ -370,7 +469,11 @@ export default function ChannelBox({
             def={def}
             value={selectedNode.getChannel(def.channel)}
             onChange={handleChange(def.channel)}
-            isKeyed={checkIsKeyed?.(def.channel)}
+            animState={checkAnimState?.(def.channel)}
+            onSetKey={() => handleSetKeyClick(def.channel)}
+            isSelected={selectedChannels.has(def.channel)}
+            onLabelMouseDown={(e) => handleLabelMouseDown(e, def.channel)}
+            onLabelMouseEnter={(e) => handleLabelMouseEnter(e, def.channel)}
           />
         ))}
 

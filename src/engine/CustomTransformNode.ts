@@ -96,9 +96,16 @@ export class CustomTransformNode extends TransformNode {
   private _lastSyncedPosition: Vector3;
   private _lastSyncedRot: Quaternion;
   private _lastSyncedScale: Vector3;
+  
+  // For Auto Key and attribute tracking
+  private _onChannelChangeCallbacks: Array<(path: string, value: number) => void> = [];
 
   // ---- Current evaluation time (set by AnimationEvaluator) ----
   public currentTime = 0;
+  
+  // Dragging states to prevent bidirectional sync fighting
+  public isDraggingRotation: boolean = false;
+  
 
   constructor(name: string, scene?: Nullable<Scene>) {
     super(name, scene);
@@ -134,6 +141,7 @@ export class CustomTransformNode extends TransformNode {
         console.warn(`CustomTransformNode: unknown channel "${path}"`);
         return;
     }
+    this._onChannelChangeCallbacks.forEach(cb => cb(path, value));
     this.markCustomDirty();
   }
 
@@ -158,6 +166,14 @@ export class CustomTransformNode extends TransformNode {
     this._onDirtyCallbacks.push(callback);
     return () => {
       this._onDirtyCallbacks = this._onDirtyCallbacks.filter(c => c !== callback);
+    };
+  }
+
+  /** Register a dedicated callback for when a specific channel changes logically natively or explicitly */
+  onChannelChange(callback: (path: string, value: number) => void): () => void {
+    this._onChannelChangeCallbacks.push(callback);
+    return () => {
+      this._onChannelChangeCallbacks = this._onChannelChangeCallbacks.filter(c => c !== callback);
     };
   }
 
@@ -198,17 +214,21 @@ export class CustomTransformNode extends TransformNode {
         this.translateX = this.position.x;
         this.translateY = this.position.y;
         this.translateZ = this.position.z;
+        this._onChannelChangeCallbacks.forEach(cb => { cb('translateX', this.translateX); cb('translateY', this.translateY); cb('translateZ', this.translateZ); });
       }
-      if (rotChanged) {
-        const euler = effRotQuat.toEulerAngles();
+      if (rotChanged && !this.isDraggingRotation) {
+        // Safely extract Euler angles from the effective quaternion, respecting the Maya rotation order
+        const euler = effRotQuat.toEulerAngles(); // Note: Babylon natively extracts to YXZ, but we just want continuous visual mapping here.
         this.rotateX = euler.x;
         this.rotateY = euler.y;
         this.rotateZ = euler.z;
+        this._onChannelChangeCallbacks.forEach(cb => { cb('rotateX', this.rotateX); cb('rotateY', this.rotateY); cb('rotateZ', this.rotateZ); });
       }
       if (scaleChanged) {
         this.scaleX = this.scaling.x;
         this.scaleY = this.scaling.y;
         this.scaleZ = this.scaling.z;
+        this._onChannelChangeCallbacks.forEach(cb => { cb('scaleX', this.scaleX); cb('scaleY', this.scaleY); cb('scaleZ', this.scaleZ); });
       }
       this.markCustomDirty();
     }
@@ -232,6 +252,7 @@ export class CustomTransformNode extends TransformNode {
     localMatrix.decompose(scaleVec, rotQuat, transVec);
 
     // 4. Push to Babylon's native properties
+    // The Maya Matrix holds absolute authority over orientation and visual projection.
     this.position.copyFrom(transVec);
     if (this.rotationQuaternion) {
       this.rotationQuaternion.copyFrom(rotQuat);

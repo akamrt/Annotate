@@ -15,6 +15,7 @@
 import type { Scene } from '@babylonjs/core/scene';
 import type { Observer } from '@babylonjs/core/Misc/observable';
 import { AnimationClip } from './ChannelBinding';
+import { TangentMode } from './types';
 
 // ---------------------------------------------------------------------------
 // AnimationEvaluator
@@ -44,6 +45,37 @@ export class AnimationEvaluator {
     this._observer = this._scene.onBeforeRenderObservable.add(() => {
       this._onBeforeRender();
     });
+  }
+
+  // ---- Maya Auto Key System -----------------------------------------------
+  
+  public autoKeyEnabled: boolean = false;
+  private _isEvaluating: boolean = false;
+
+  /** 
+   * Maya-style Auto Key: Commits a new keyframe transparently based on interactive 
+   * transform modifications if the channel already has keys.
+   */
+  public autoKey(targetId: string, propertyPath: string, newValue: number): void {
+    if (!this.autoKeyEnabled || this._isEvaluating) return;
+
+    for (const clip of this._clips) {
+      for (const binding of clip.bindings) {
+        if (binding.targetNode.name === targetId && binding.channelPath === propertyPath) {
+          const fcurve = binding.curve;
+          if (fcurve.length > 0) { // Maya strict rule: only auto key if curves exist
+            // Create and insert a smooth bezier key dynamically
+            fcurve.addKey({
+              time: this._currentTime,
+              value: newValue,
+              inTangent: { x: -1, y: 0 },
+              outTangent: { x: 1, y: 0 },
+              tangentMode: TangentMode.Bezier
+            });
+          }
+        }
+      }
+    }
   }
 
   // ---- Clip management ----------------------------------------------------
@@ -156,10 +188,12 @@ export class AnimationEvaluator {
 
   /** Evaluate all registered clips at the current time. */
   private _evaluateAllClips(): void {
+    this._isEvaluating = true;
     for (const clip of this._clips) {
       const clippedTime = clip.clampTime(this._currentTime);
       clip.evaluate(clippedTime);
     }
+    this._isEvaluating = false;
   }
 
   // ---- Cleanup ------------------------------------------------------------

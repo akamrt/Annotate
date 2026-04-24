@@ -41,6 +41,8 @@ interface TimelineProps {
   onGoToEnd?: () => void;
   /** Timeline height */
   height?: number;
+  /** Force update tick */
+  tick?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,17 +70,26 @@ export default function Timeline({
   onGoToStart,
   onGoToEnd,
   height = 120,
+  tick = 0,
 }: TimelineProps) {
   const rulerRef = useRef<HTMLDivElement>(null);
   const [rulerWidth, setRulerWidth] = useState(800);
   const [isDragging, setIsDragging] = useState(false);
   const [loopRange, setLoopRange] = useState<[number, number]>([0, 120]);
   const [fps, setFps] = useState(24);
+  const [autoKeyEnabled, setAutoKeyEnabled] = useState(false);
 
   // Update from evaluator
   useEffect(() => {
     if (!evaluator) return;
     setFps(evaluator.fps);
+    setAutoKeyEnabled(evaluator.autoKeyEnabled);
+  }, [evaluator]);
+
+  const toggleAutoKey = useCallback(() => {
+    if (!evaluator) return;
+    evaluator.autoKeyEnabled = !evaluator.autoKeyEnabled;
+    setAutoKeyEnabled(evaluator.autoKeyEnabled);
   }, [evaluator]);
 
   // Observe ruler width
@@ -152,7 +163,7 @@ export default function Timeline({
       }
     }
     return Array.from(positions).sort((a, b) => a - b);
-  }, [evaluator, selectedNode]);
+  }, [evaluator, selectedNode, tick]);
 
   // Compute ruler tick marks
   const ticks = useMemo(() => {
@@ -242,6 +253,22 @@ export default function Timeline({
           icon="⏭"
           title="Go to End"
           onClick={onGoToEnd || (() => onScrub(loopRange[1]))}
+        />
+
+        {/* Separator */}
+        <div style={{
+          width: 1,
+          height: 16,
+          background: T.borderDim,
+          margin: '0 4px',
+        }} />
+
+        <TButton
+          icon="Auto 🗝"
+          title="Auto Keyframe Mode (keys changed attributes if they already have an animation curve)"
+          accent={autoKeyEnabled}
+          onClick={toggleAutoKey}
+          style={{ width: 'auto', padding: '0 6px', color: autoKeyEnabled ? '#ff3366' : T.textDim, borderColor: autoKeyEnabled ? '#ff336644' : T.borderDim, background: autoKeyEnabled ? '#ff336622' : undefined }}
         />
 
         {/* Separator */}
@@ -483,11 +510,13 @@ function TButton({
   title,
   accent,
   onClick,
+  style,
 }: {
   icon: string;
   title: string;
   accent?: boolean;
   onClick: () => void;
+  style?: React.CSSProperties;
 }) {
   return (
     <button
@@ -507,16 +536,21 @@ function TButton({
         cursor: 'pointer',
         transition: 'all 0.12s ease',
         padding: 0,
+        ...style,
       }}
       onMouseEnter={e => {
-        (e.currentTarget as HTMLElement).style.background = accent
-          ? 'rgba(0,212,255,0.25)'
-          : 'rgba(255,255,255,0.1)';
+        if (!style?.background) {
+          (e.currentTarget as HTMLElement).style.background = accent
+            ? 'rgba(0,212,255,0.25)'
+            : 'rgba(255,255,255,0.1)';
+        }
       }}
       onMouseLeave={e => {
-        (e.currentTarget as HTMLElement).style.background = accent
-          ? 'rgba(0,212,255,0.12)'
-          : 'rgba(255,255,255,0.04)';
+        if (!style?.background) {
+          (e.currentTarget as HTMLElement).style.background = accent
+            ? 'rgba(0,212,255,0.12)'
+            : 'rgba(255,255,255,0.04)';
+        }
       }}
     >
       {icon}

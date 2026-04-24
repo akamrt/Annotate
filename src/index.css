@@ -7,4 +7,11 @@ body {
   padding: 0;
   background-color: #1e1e1e; /* Match the app darker theme */
   color: white;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input, textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }

@@ -19,7 +19,7 @@ import { Engine } from '@babylonjs/core/Engines/engine';
 import { Scene } from '@babylonjs/core/scene';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight';
-import { Vector3, Matrix } from '@babylonjs/core/Maths/math.vector';
+import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math.vector';
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
@@ -27,6 +27,11 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { PointerEventTypes } from '@babylonjs/core/Events/pointerEvents';
 import { HighlightLayer } from '@babylonjs/core/Layers/highlightLayer';
 import { GizmoManager } from '@babylonjs/core/Gizmos/gizmoManager';
+import { PlaneRotationGizmo } from '@babylonjs/core/Gizmos/planeRotationGizmo';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
+import { PointerDragBehavior } from '@babylonjs/core/Behaviors/Meshes/pointerDragBehavior';
+import { ActionManager } from '@babylonjs/core/Actions/actionManager';
+import { ExecuteCodeAction } from '@babylonjs/core/Actions/directActions';
 
 // Engine imports
 import { CustomTransformNode } from './CustomTransformNode';
@@ -116,6 +121,8 @@ export default function TestScene({ onClose }: TestSceneProps) {
   const [selectedNode, setSelectedNode] = useState<CustomTransformNode | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const selectedNodeRef = useRef<CustomTransformNode | null>(null);
+  const [selectionArray, setSelectionArray] = useState<CustomTransformNode[]>([]);
+  const selectionArrayRef = useRef<CustomTransformNode[]>([]);
 
   // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -129,6 +136,35 @@ export default function TestScene({ onClose }: TestSceneProps) {
 
   // Force re-render for channel box updates
   const [tick, setTick] = useState(0);
+
+  const handleSelect = useCallback((node: CustomTransformNode | null, name: string | null, e?: any) => {
+    let currentSel = selectionArrayRef.current;
+    
+    if (!node) {
+      if (!e?.shiftKey) {
+        setSelectionArray([]);
+        selectionArrayRef.current = [];
+        setSelectedNode(null);
+        setSelectedName(null);
+      }
+      return;
+    }
+
+    if (e?.altKey) {
+       currentSel = currentSel.filter(n => n !== node);
+    } else if (e?.shiftKey) {
+       if (!currentSel.includes(node)) currentSel = [...currentSel, node];
+       else currentSel = currentSel.filter(n => n !== node);
+    } else {
+       currentSel = [node];
+    }
+    
+    const lead = currentSel.length > 0 ? currentSel[currentSel.length - 1] : null;
+    setSelectionArray(currentSel);
+    selectionArrayRef.current = currentSel;
+    setSelectedNode(lead);
+    setSelectedName(lead ? lead.name : null);
+  }, []);
 
   // ---- Scene setup ----
   useEffect(() => {
@@ -165,49 +201,372 @@ export default function TestScene({ onClose }: TestSceneProps) {
     // Gizmo Manager for translation/rotation tooling
     const gizmoManager = new GizmoManager(scene);
     gizmoManager.positionGizmoEnabled = true;
-    gizmoManager.rotationGizmoEnabled = true;
-    gizmoManager.scaleGizmoEnabled = true;
+    gizmoManager.rotationGizmoEnabled = false;
+    gizmoManager.scaleGizmoEnabled = false;
     gizmoManager.usePointerToAttachGizmos = false;
     gizmoManagerRef.current = gizmoManager;
 
-    // Wire rotation gizmo drag events to our custom channels.
-    // We read from selectedNodeRef (a ref) so the closure always sees
-    // the latest selected node, not the initial null.
-    if (gizmoManager.gizmos.rotationGizmo) {
-      const rotG = gizmoManager.gizmos.rotationGizmo;
-      let startX = 0, startY = 0, startZ = 0;
-
-      if (rotG.xGizmo) {
-        rotG.xGizmo.dragBehavior.onDragStartObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) startX = n.rotateX;
-        });
-        rotG.xGizmo.dragBehavior.onDragObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) { n.setChannel('rotateX', startX + rotG.xGizmo.angle); }
-        });
-      }
-      if (rotG.yGizmo) {
-        rotG.yGizmo.dragBehavior.onDragStartObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) startY = n.rotateY;
-        });
-        rotG.yGizmo.dragBehavior.onDragObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) { n.setChannel('rotateY', startY + rotG.yGizmo.angle); }
-        });
-      }
-      if (rotG.zGizmo) {
-        rotG.zGizmo.dragBehavior.onDragStartObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) startZ = n.rotateZ;
-        });
-        rotG.zGizmo.dragBehavior.onDragObservable.add(() => {
-          const n = selectedNodeRef.current;
-          if (n) { n.setChannel('rotateZ', startZ + rotG.zGizmo.angle); }
-        });
-      }
+    // Enable native XYZ orthogonal planar squares for translation
+    if (gizmoManager.gizmos.positionGizmo) {
+      gizmoManager.gizmos.positionGizmo.planarGizmoEnabled = true;
     }
+
+    const wireCustomGizmos = () => {
+      if (gizmoManager.gizmos.positionGizmo) {
+        const posG = gizmoManager.gizmos.positionGizmo;
+        if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.clear();
+        if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.clear();
+        if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.clear();
+        if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.clear();
+        if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.clear();
+        if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.clear();
+
+        const broadcastTranslationDelta = (delta: Vector3) => {
+          selectionArrayRef.current.forEach(n => {
+            n.setChannel('translateX', n.translateX + delta.x);
+            n.setChannel('translateY', n.translateY + delta.y);
+            n.setChannel('translateZ', n.translateZ + delta.z);
+            n.syncToBabylon();
+          });
+        };
+
+        if (!(gizmoManager as any)._cameraSpaceGizmo) {
+          const utilScene = gizmoManager.utilityLayer.utilityLayerScene;
+          const screenBoxMat = new StandardMaterial("screenBoxMat", utilScene);
+          screenBoxMat.emissiveColor = new Color3(0.2, 0.8, 1.0); // Maya light blue
+          screenBoxMat.alpha = 0.5;
+          screenBoxMat.disableLighting = true;
+          screenBoxMat.backFaceCulling = false; // Prevent it from being invisible
+
+          const screenBox = MeshBuilder.CreateBox("screenDragBox", { size: 0.05, depth: 0.001 }, utilScene);
+          screenBox.material = screenBoxMat;
+          screenBox.billboardMode = Mesh.BILLBOARDMODE_ALL;
+          
+          // Connect visually straight to the Gizmo's internal core so it never drags off-center
+          if ((posG as any)._rootMesh) {
+             screenBox.setParent((posG as any)._rootMesh);
+          }
+          
+          const screenDragBehavior = new PointerDragBehavior({}); // Unconstrained = Camera space
+          screenDragBehavior.useObjectOrientationForDragging = false;
+          // CRITICAL: Prevent the pointer from literally dragging the Mesh out of the Gizmo!
+          screenDragBehavior.moveAttached = false; 
+          screenBox.addBehavior(screenDragBehavior);
+
+          screenDragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+          
+          (gizmoManager as any)._cameraSpaceGizmo = screenBox;
+        }
+
+        // Ensure the move element is hidden when orientation (rotation) mode is active
+        if ((gizmoManager as any)._cameraSpaceGizmo) {
+          (gizmoManager as any)._cameraSpaceGizmo.isVisible = gizmoManager.positionGizmoEnabled;
+        }
+
+        if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+
+        // Maya Styling: Native orthogonal drag squares should be comfortably small and highly transparent, deferring focus to the main axes.
+        const styleOrthogonalPlane = (planeGizmo: any) => {
+          if (!planeGizmo || !planeGizmo._rootMesh) return;
+          planeGizmo._rootMesh.scaling.setAll(0.65);
+          planeGizmo._rootMesh.getChildMeshes().forEach((m: any) => {
+            if (m.material && m.material.alpha !== undefined) {
+              // Default state: Only wires visible, completely transparent fill!
+              m.material.alpha = 0.0;
+              m.enableEdgesRendering();
+              m.edgesWidth = 6.0;
+              m.edgesColor = new Color4(
+                 m.material.emissiveColor ? m.material.emissiveColor.r : 0.8,
+                 m.material.emissiveColor ? m.material.emissiveColor.g : 0.8,
+                 m.material.emissiveColor ? m.material.emissiveColor.b : 0.8,
+                 1.0
+              );
+              
+              const utilScene = gizmoManager.utilityLayer.utilityLayerScene;
+              if (!m.actionManager) m.actionManager = new ActionManager(utilScene);
+              
+              // Hover ON -> fill slightly like Maya
+              m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, () => {
+                  m.material.alpha = 0.45;
+              }));
+              
+              // Hover OFF -> invisible fill
+              m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, () => {
+                  m.material.alpha = 0.0;
+              }));
+            }
+          });
+        };
+        styleOrthogonalPlane(posG.xPlaneGizmo);
+        styleOrthogonalPlane(posG.yPlaneGizmo);
+        styleOrthogonalPlane(posG.zPlaneGizmo);
+      }
+
+      if (gizmoManager.gizmos.rotationGizmo) {
+        const rotG = gizmoManager.gizmos.rotationGizmo;
+        
+        // Remove previous custom observers to prevent duplicate firing if called arbitrarily
+        // NOTE: We DO NOT clear() the entire observable, because Babylon's internal 
+        // PlaneRotationGizmo logic uses it to compute the 'angle' property!
+        if (!(rotG as any)._customWired) {
+          // ---------------------------------------------------------------
+          // WORLD-SPACE GIZMO ORIENTATION
+          // ---------------------------------------------------------------
+          // Set all three axis gizmos to World space: their rings always
+          // align to world X/Y/Z regardless of the object's local rotation.
+          // This prevents the "snap" when clicking a ring — the gizmo
+          // orientation stays identical before and after grabbing.
+          //
+          // The drag angle is then applied as a world-axis rotation delta
+          // using quaternion math, properly decomposed back to Euler channels.
+          // ---------------------------------------------------------------
+          if (rotG.xGizmo) rotG.xGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+          if (rotG.yGizmo) rotG.yGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+          if (rotG.zGizmo) rotG.zGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+
+          // Shared state: capture the initial local rotation quaternion at drag start.
+          // All three axis gizmos use the same pattern: rotate around a world axis,
+          // then decompose back to Euler channels.
+          let initialRotQuat = new Quaternion();
+
+          /**
+           * Helper: apply a world-space rotation delta to the initial local rotation
+           * and write the result back to the node's Euler channels.
+           *
+           * @param worldAxis - The world-space axis to rotate around (e.g. Vector3.Right() for X)
+           * @param angle     - The accumulated drag angle from PlaneRotationGizmo
+           */
+          const applyWorldAxisRotation = (n: CustomTransformNode, worldAxis: Vector3, angle: number) => {
+            // Build the world-space rotation delta
+            const rotDelta = Quaternion.RotationAxis(worldAxis, angle);
+            // Apply delta to the initial rotation: delta * initial (pre-multiply = world space)
+            const newRot = rotDelta.multiply(initialRotQuat);
+            // Decompose to Euler and write to channels
+            const euler = newRot.toEulerAngles();
+            n.setChannel('rotateX', euler.x);
+            n.setChannel('rotateY', euler.y);
+            n.setChannel('rotateZ', euler.z);
+            n.syncToBabylon();
+          };
+
+          const captureInitialRotation = (n: CustomTransformNode) => {
+            n.isDraggingRotation = true;
+            // Cache the exact starting local rotation as a quaternion from the matrix stack
+            const localMat = n.matrixStack.evaluate();
+            const _s = new Vector3(), _t = new Vector3();
+            localMat.decompose(_s, initialRotQuat, _t);
+          };
+
+          const finishDrag = (n: CustomTransformNode) => {
+            n.isDraggingRotation = false;
+            n.syncToBabylon();
+          };
+
+          // --- Maya Screen Space Rotation Ring ---
+          if (!(rotG as any)._cameraSpaceRotationGizmo) {
+            // The ring's local plane normal is (0,0,1). We aim that normal at the camera
+            // using a simple LookAt with a stable world-up vector — no roll artifacts.
+            const screenRing = new PlaneRotationGizmo(new Vector3(0, 0, 1), Color3.FromHexString("#00ffff"), gizmoManager.utilityLayer);
+            
+            const proxyNode = new TransformNode("screenRingProxy", scene);
+            proxyNode.rotationQuaternion = new Quaternion();
+            screenRing.attachedNode = proxyNode;
+            
+            // MUST be true so Babylon's internal drag math transforms the plane normal
+            // by proxyNode's rotation — aligning the drag plane to the camera aim direction.
+            screenRing.updateGizmoRotationToMatchAttachedMesh = true;
+            screenRing.scaleRatio = 1.35;
+            
+            // Reusable temp matrix
+            const _lookAtMat = new Matrix();
+            
+            // Guard: freeze alignment during drag so Babylon's internal angle
+            // accumulator isn't corrupted by our callback overwriting the proxyNode.
+            let isDraggingScreenRing = false;
+            
+            // Every frame: aim the proxyNode's +Z at the camera using a stable LookAt
+            scene.onBeforeRenderObservable.add(() => {
+              if (isDraggingScreenRing) return; // Don't fight Babylon during drag
+              if (selectedNodeRef.current && scene.activeCamera) {
+                const objPos = selectedNodeRef.current.absolutePosition;
+                const camPos = scene.activeCamera.globalPosition;
+                
+                // LookAtLH(eye, target, up): creates a view matrix where +Z points eye→target.
+                // Inverting it gives a world rotation where local +Z = aim direction.
+                // Using Vector3.Up() as the up-vector guarantees NO roll.
+                Matrix.LookAtLHToRef(objPos, camPos, Vector3.Up(), _lookAtMat);
+                _lookAtMat.invert();
+                _lookAtMat.decompose(undefined, proxyNode.rotationQuaternion!, undefined);
+                
+                // Pin position to the selected object
+                proxyNode.position.copyFrom(objPos);
+                proxyNode.computeWorldMatrix(true);
+              }
+            });
+            
+            // Visibility control: hide/show the ring's root mesh directly
+            // (Do NOT use screenRing.isEnabled — its setter nulls out attachedNode!)
+            scene.onBeforeRenderObservable.add(() => {
+              const shouldShow = gizmoManager.rotationGizmoEnabled && selectedNodeRef.current !== null;
+              if ((screenRing as any)._rootMesh) {
+                (screenRing as any)._rootMesh.setEnabled(shouldShow);
+              }
+            });
+            
+            // Wire the drag
+            let aimAxis = new Vector3();
+
+            screenRing.dragBehavior.onDragStartObservable.add(() => {
+               const n = selectedNodeRef.current;
+               if (n && scene.activeCamera) {
+                 captureInitialRotation(n);
+                 isDraggingScreenRing = true;
+                 
+                 // The rotation axis = the aim vector from object to camera (world space)
+                 // This is the SAME axis the ring's plane normal is aligned to.
+                 aimAxis = scene.activeCamera.globalPosition
+                   .subtract(n.absolutePosition)
+                   .normalize();
+                 
+                 // Transform the world-space aim axis into parent's local space
+                 const parentNode = n.parent as TransformNode;
+                 if (parentNode) {
+                   const invParentWorld = new Matrix();
+                   parentNode.computeWorldMatrix(true).invertToRef(invParentWorld);
+                   Vector3.TransformNormalToRef(aimAxis, invParentWorld, aimAxis);
+                   aimAxis.normalize();
+                 }
+               }
+            });
+            screenRing.dragBehavior.onDragObservable.add(() => {
+               const n = selectedNodeRef.current;
+               if (n) {
+                  // screenRing.angle accumulates the total drag angle since dragStart
+                  const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
+                  const newRot = rotDelta.multiply(initialRotQuat);
+                  
+                  const euler = newRot.toEulerAngles();
+                  n.setChannel('rotateX', euler.x);
+                  n.setChannel('rotateY', euler.y);
+                  n.setChannel('rotateZ', euler.z);
+                  n.syncToBabylon();
+               }
+            });
+            screenRing.dragBehavior.onDragEndObservable.add(() => {
+               isDraggingScreenRing = false;
+               const n = selectedNodeRef.current;
+               if (n) finishDrag(n);
+            });
+            
+            (rotG as any)._cameraSpaceRotationGizmo = screenRing;
+          }
+
+          // --- X axis (world space) ---
+          if (rotG.xGizmo) {
+            rotG.xGizmo.dragBehavior.onDragStartObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) captureInitialRotation(n);
+            });
+            rotG.xGizmo.dragBehavior.onDragObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) applyWorldAxisRotation(n, Vector3.Right(), rotG.xGizmo.angle);
+            });
+            rotG.xGizmo.dragBehavior.onDragEndObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) finishDrag(n);
+            });
+          }
+
+          // --- Y axis (world space) ---
+          if (rotG.yGizmo) {
+            rotG.yGizmo.dragBehavior.onDragStartObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) captureInitialRotation(n);
+            });
+            rotG.yGizmo.dragBehavior.onDragObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) applyWorldAxisRotation(n, Vector3.Up(), rotG.yGizmo.angle);
+            });
+            rotG.yGizmo.dragBehavior.onDragEndObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) finishDrag(n);
+            });
+          }
+
+          // --- Z axis (world space) ---
+          if (rotG.zGizmo) {
+            rotG.zGizmo.dragBehavior.onDragStartObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) captureInitialRotation(n);
+            });
+            rotG.zGizmo.dragBehavior.onDragObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) applyWorldAxisRotation(n, Vector3.Forward(), rotG.zGizmo.angle);
+            });
+            rotG.zGizmo.dragBehavior.onDragEndObservable.add(() => {
+              const n = selectedNodeRef.current;
+              if (n) finishDrag(n);
+            });
+          }
+
+          (rotG as any)._customWired = true;
+        }
+      }
+
+      // Babylon's AxisScaleGizmo natively fails to scale TransformNodes without bounding boxes.
+      // We explicitly bridge its per-tick UI dragDelta straight into our continuous channel.
+      if (gizmoManager.gizmos.scaleGizmo) {
+        const scaleG = gizmoManager.gizmos.scaleGizmo;
+        // Sensitivity ratio that translates pixel drag distance to fractional Maya scale.
+        const SCALE_SENSITIVITY = 0.05;
+        
+        if (scaleG.xGizmo) scaleG.xGizmo.dragBehavior.onDragObservable.clear();
+        if (scaleG.yGizmo) scaleG.yGizmo.dragBehavior.onDragObservable.clear();
+        if (scaleG.zGizmo) scaleG.zGizmo.dragBehavior.onDragObservable.clear();
+        if (scaleG.uniformScaleGizmo) scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.clear();
+
+        if (scaleG.xGizmo) {
+          scaleG.xGizmo.dragBehavior.onDragObservable.add((e) => {
+            const n = selectedNodeRef.current;
+            // e.dragDistance is the fractional distance moved *this exact frame*.
+            // Accumulate it onto the current scale explicitly to prevent glitching jumps.
+            if (n) { n.setChannel('scaleX', n.scaleX + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+          });
+        }
+        if (scaleG.yGizmo) {
+          scaleG.yGizmo.dragBehavior.onDragObservable.add((e) => {
+            const n = selectedNodeRef.current;
+            if (n) { n.setChannel('scaleY', n.scaleY + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+          });
+        }
+        if (scaleG.zGizmo) {
+          scaleG.zGizmo.dragBehavior.onDragObservable.add((e) => {
+            const n = selectedNodeRef.current;
+            if (n) { n.setChannel('scaleZ', n.scaleZ + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+          });
+        }
+        if (scaleG.uniformScaleGizmo) {
+          scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.add((e) => {
+            const n = selectedNodeRef.current;
+            if (n) {
+              const delta = e.dragDistance * SCALE_SENSITIVITY;
+              n.setChannel('scaleX', n.scaleX + delta);
+              n.setChannel('scaleY', n.scaleY + delta);
+              n.setChannel('scaleZ', n.scaleZ + delta);
+              n.syncToBabylon();
+            }
+          });
+        }
+      }
+    };
+    
+    // Wire immediately in case any initialized
+    wireCustomGizmos();
 
     // Camera
     const camera = new ArcRotateCamera(
@@ -306,6 +665,11 @@ export default function TestScene({ onClose }: TestSceneProps) {
       marker.position.y = 0.8;
       marker.parent = node;
 
+      // Pipe Auto Key hooks so interactively manipulated gizmo coordinates are physically keyed
+      node.onChannelChange((path, value) => {
+        evaluator.autoKey(node.name, path, value);
+      });
+
       nodes.push(node);
     });
 
@@ -387,6 +751,29 @@ export default function TestScene({ onClose }: TestSceneProps) {
       }
     });
 
+    // Keyboard observable for W/E/R hotkeys to swap gizmos
+    scene.onKeyboardObservable.add((kbInfo) => {
+      if (kbInfo.type === 1) { // 1 = KeyboardEventTypes.KEYDOWN
+        const key = kbInfo.event.key.toLowerCase();
+        if (key === 'w') {
+          gizmoManager.positionGizmoEnabled = true;
+          gizmoManager.rotationGizmoEnabled = false;
+          gizmoManager.scaleGizmoEnabled = false;
+          wireCustomGizmos();
+        } else if (key === 'e') {
+          gizmoManager.positionGizmoEnabled = false;
+          gizmoManager.rotationGizmoEnabled = true;
+          gizmoManager.scaleGizmoEnabled = false;
+          wireCustomGizmos();
+        } else if (key === 'r') {
+          gizmoManager.positionGizmoEnabled = false;
+          gizmoManager.rotationGizmoEnabled = false;
+          gizmoManager.scaleGizmoEnabled = true;
+          wireCustomGizmos();
+        }
+      }
+    });
+
     // Viewport Picking (Selection)
     scene.onPointerObservable.add((pointerInfo) => {
       if (pointerInfo.type === PointerEventTypes.POINTERDOWN && pointerInfo.event.button === 0) {
@@ -407,8 +794,7 @@ export default function TestScene({ onClose }: TestSceneProps) {
           let foundNode = false;
           while (currentParent) {
             if (currentParent instanceof CustomTransformNode) {
-              setSelectedNode(currentParent);
-              setSelectedName(currentParent.name);
+              handleSelect(currentParent, currentParent.name, pointerInfo.event);
               foundNode = true;
               break;
             }
@@ -416,18 +802,18 @@ export default function TestScene({ onClose }: TestSceneProps) {
           }
           if (!foundNode) {
             // Clicked a mesh that isn't part of a CustomTransformNode (e.g. ground)
-            setSelectedNode(null);
-            setSelectedName(null);
+            handleSelect(null, null, pointerInfo.event);
           }
         } else {
           // Clicked empty space
-          setSelectedNode(null);
-          setSelectedName(null);
+          handleSelect(null, null, pointerInfo.event);
         }
       }
     });
 
-    engine.runRenderLoop(() => scene.render());
+    engine.runRenderLoop(() => {
+      scene.render();
+    });
 
     const handleResize = () => engine.resize();
     window.addEventListener('resize', handleResize);
@@ -463,23 +849,30 @@ export default function TestScene({ onClose }: TestSceneProps) {
     // Attach gizmo
     if (selectedNode) {
       gm.attachToNode(selectedNode);
-      // Highlight all child meshes of the selected node
-      selectedNode.getChildMeshes().forEach(mesh => {
-        hl.addMesh(mesh as Mesh, Color3.White());
-      });
     } else {
       gm.attachToNode(null);
     }
     
+    // Explicit Camera translation square routing
+    const screenBox = (gm as any)._cameraSpaceGizmo as Mesh;
+    if (screenBox) {
+       if (selectedNode && gm.positionGizmoEnabled) {
+          screenBox.setEnabled(true);
+       } else {
+          screenBox.setEnabled(false);
+       }
+    }
+
+    selectionArray.forEach(selNode => {
+      selNode.getChildMeshes().forEach(mesh => {
+        hl.addMesh(mesh as Mesh, Color3.White());
+      });
+    });
+    
     return removeDirtyObserver;
-  }, [selectedNode]);
+  }, [selectionArray, selectedNode]);
 
   // ---- Handlers ----
-
-  const handleSelect = useCallback((node: CustomTransformNode, name: string) => {
-    setSelectedNode(node);
-    setSelectedName(name);
-  }, []);
 
   const handlePlayPause = useCallback(() => {
     const ev = evaluatorRef.current;
@@ -545,23 +938,31 @@ export default function TestScene({ onClose }: TestSceneProps) {
         clip.addBinding(binding);
       }
       
-      const val = node.getChannel(channel);
-      binding.curve.addKey(createKeyframe(frame, val, TangentMode.Spline));
+      const isKeyed = binding.curve.keys.some(k => Math.abs(k.time - frame) < 0.01);
+      if (isKeyed) {
+        const idx = binding.curve.keys.findIndex(k => Math.abs(k.time - frame) < 0.01);
+        if (idx !== -1) binding.curve.removeKey(idx);
+      } else {
+        const val = node.getChannel(channel);
+        binding.curve.addKey(createKeyframe(frame, val, TangentMode.Spline));
+      }
     }
     
     // Force UI tick to show the keys (if we add UI indicators later)
     setTick(t => t + 1);
   }, [currentFrame]);
 
-  const checkIsKeyed = useCallback((channel: string) => {
-    if (!selectedNode || !evaluatorRef.current || evaluatorRef.current.clips.length === 0) return false;
+  const checkAnimState = useCallback((channel: string) => {
+    if (!selectedNode || !evaluatorRef.current || evaluatorRef.current.clips.length === 0) return { hasCurve: false, isKeyed: false };
     const clip = evaluatorRef.current.clips[0];
     const binding = clip.findBinding(selectedNode, channel as ChannelPath);
-    if (!binding) return false;
+    if (!binding) return { hasCurve: false, isKeyed: false };
     
     // Check if there's a key on the *exact* current integer frame
     const frame = Math.round(currentFrame);
-    return binding.curve.keys.some(k => Math.abs(k.time - frame) < 0.01);
+    const isKeyed = binding.curve.keys.some(k => Math.abs(k.time - frame) < 0.01);
+    const hasCurve = binding.curve.keys.length > 0;
+    return { hasCurve, isKeyed };
   }, [selectedNode, currentFrame]);
 
   // Global hotkeys
@@ -681,11 +1082,11 @@ export default function TestScene({ onClose }: TestSceneProps) {
                 textAlign: 'center',
                 padding: '1px 6px',
                 borderRadius: 3,
-                border: `1px solid ${selectedName === `node_${order}` ? T.accent : 'transparent'}`,
-                background: selectedName === `node_${order}` ? T.accentGlow : 'transparent',
+                border: `1px solid ${selectionArray.includes(nodesRef.current[i]) ? T.accent : 'transparent'}`,
+                background: selectionArray.includes(nodesRef.current[i]) ? T.accentGlow : 'transparent',
                 cursor: 'pointer',
               }}
-                onClick={() => handleSelect(nodesRef.current[i], `node_${order}`)}
+                onClick={(e) => handleSelect(nodesRef.current[i], `node_${order}`, e)}
               >
                 <div style={{ fontSize: 8, color: NODE_COLORS_HEX[i], fontWeight: 700 }}>●</div>
                 <div style={{ fontSize: 9, fontWeight: 600, color: NODE_COLORS_HEX[i] }}>{order}</div>
@@ -745,8 +1146,8 @@ export default function TestScene({ onClose }: TestSceneProps) {
                 onChannelChange={handleChannelChange}
                 width={260}
                 currentFrame={currentFrame}
-                checkIsKeyed={checkIsKeyed}
-                onSetKey={(channel) => handleSetKey(selectedNode!, channel ? [channel] : undefined)}
+                checkAnimState={checkAnimState}
+                onSetKey={(channels) => handleSetKey(selectedNode!, channels)}
               />
             ) : (
               <AttributeEditor
@@ -770,6 +1171,7 @@ export default function TestScene({ onClose }: TestSceneProps) {
         onStop={handleStop}
         onScrub={handleScrub}
         height={100}
+        tick={tick}
       />
     </div>
   );
