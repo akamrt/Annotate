@@ -617,7 +617,27 @@ export default function TestScene({ onClose }: TestSceneProps) {
       styleOrthogonalPlane(posG.zPlaneGizmo);
     }
 
-    // ---- ROTATION GIZMO WIRING — quaternion world-space rotation ----
+    // =====================================================
+    // ROTATION GIZMO WIRING — fixed quaternion math
+    //
+    // Bug fixes vs naive approach:
+    // 1. Capture prevAngle at drag-start (not initialQuat from matrix stack)
+    //    Babylon's axisGizmo.angle is CUMULATIVE since dragStart.
+    //    Using initialQuat each frame double-counts the initial state.
+    //    Solution: capture the angle at dragStart, use DELTA = currentAngle - prevAngle.
+    //
+    // 2. Quaternion multiplication order for local-space rotation.
+    //    World:  newQuat = initialQuat.multiply(rotDelta)        [premultiply delta]
+    //    Local:  newQuat = initialQuat.multiply(rotDelta)  then convert back to Euler
+    //    (rotDelta = RotationAxis(localAxis, deltaAngle) where localAxis = worldAxis rotated by initialQuat^-1)
+    //
+    // 3. Local axis: transform world rotation-axis by the object's inverse rotation
+    //    so the ring drags in the object's local coordinate space.
+    //
+    // 4. Mode buttons (Local/World/Gimbal) re-attach the gizmo to apply
+    //    updateGizmoRotationToMatchAttachedMesh setting correctly.
+    // =====================================================
+
     const rotGizmo = gm.gizmos.rotationGizmo;
     if (rotGizmo) {
       const wireAxis = (axis: 'x' | 'y' | 'z', worldAxis: Vector3) => {
@@ -626,26 +646,61 @@ export default function TestScene({ onClose }: TestSceneProps) {
         if ((axisGizmo as any)._rotWired) return;
         (axisGizmo as any)._rotWired = true;
         axisGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-        let initialRotQuat = new Quaternion();
+
+        // State captured per-drag (not shared across axes)
+        let prevAngle = 0;
+        let initialQuat = new Quaternion();
+
         axisGizmo.dragBehavior.onDragStartObservable.add(() => {
           const n = selectedNodeRef.current;
           if (!n) return;
           n.isDraggingRotation = true;
+          prevAngle = 0;           // Reset cumulative angle baseline
           const localMat = n.matrixStack.evaluate();
           const _s = new Vector3(), _t = new Vector3();
-          localMat.decompose(_s, initialRotQuat, _t);
+          localMat.decompose(_s, initialQuat, _t);
         });
+
         axisGizmo.dragBehavior.onDragObservable.add(() => {
           const n = selectedNodeRef.current;
           if (!n) return;
-          const rotDelta = Quaternion.RotationAxis(worldAxis, axisGizmo.angle);
-          const newRot = rotDelta.multiply(initialRotQuat);
-          const euler = newRot.toEulerAngles();
-          n.setChannel('rotateX', euler.x);
-          n.setChannel('rotateY', euler.y);
-          n.setChannel('rotateZ', euler.z);
+
+          // Delta angle since last frame (NOT total cumulative — avoids double-count)
+          const delta = axisGizmo.angle - prevAngle;
+          prevAngle = axisGizmo.angle;
+
+          if (Math.abs(delta) < 0.0001) return; // Snap tiny deltas
+
+          // Determine which rotation mode is active from the gizmoModeManager
+          const mode = gizmoModeManagerRef.current?.rotateMode ?? 'world';
+
+          if (mode === 'world') {
+            // World-space: rotate around fixed world axis
+            const rotDelta = Quaternion.RotationAxis(worldAxis, delta);
+            const newQuat = initialQuat.multiply(rotDelta);
+            const euler = newQuat.toEulerAngles();
+            n.setChannel('rotateX', euler.x);
+            n.setChannel('rotateY', euler.y);
+            n.setChannel('rotateZ', euler.z);
+          } else {
+            // Local-space / Gimbal: rotate around the object's LOCAL axis
+            // Transform worldAxis into local space: localAxis = initialQuat^-1 * worldAxis * initialQuat
+            // In quaternion terms: localAxisVec = rotByQuat(worldAxis, initialQuat.inverse())
+            const invQ = new Quaternion();
+            initialQuat.inverseToRef(invQ);
+            const localAxis = new Vector3();
+            worldAxis.rotateByQuaternionToRef(invQ, localAxis);
+
+            const rotDelta = Quaternion.RotationAxis(localAxis, delta);
+            const newQuat = initialQuat.multiply(rotDelta);
+            const euler = newQuat.toEulerAngles();
+            n.setChannel('rotateX', euler.x);
+            n.setChannel('rotateY', euler.y);
+            n.setChannel('rotateZ', euler.z);
+          }
           n.syncToBabylon();
         });
+
         axisGizmo.dragBehavior.onDragEndObservable.add(() => {
           const n = selectedNodeRef.current;
           if (n) { n.isDraggingRotation = false; n.syncToBabylon(); }
@@ -656,23 +711,33 @@ export default function TestScene({ onClose }: TestSceneProps) {
       wireAxis('y', Vector3.Up());
       wireAxis('z', Vector3.Forward());
 
+      // --- Screen-space (Maya-style) rotation ring ---
       if (!(rotGizmo as any)._screenRingWired) {
         (rotGizmo as any)._screenRingWired = true;
-        const screenRing = new PlaneRotationGizmo(new Vector3(0, 0, 1), Color3.FromHexString('#00ffff'), gm.utilityLayer);
-        const proxyNode = new TransformNode('screenRingProxy', scene!);
+
+        const screenRing = new PlaneRotationGizmo(
+          new Vector3(0, 0, 1),
+          Color3.FromHexString('#00ffff'),
+          gm.utilityLayer,
+        );
+
+        const proxyNode = new TransformNode('screenRingProxy', scene);
         proxyNode.rotationQuaternion = Quaternion.Identity();
         screenRing.attachedNode = proxyNode;
         screenRing.updateGizmoRotationToMatchAttachedMesh = true;
         screenRing.scaleRatio = 1.35;
+
         const _lookAtMat = new Matrix();
         let isDraggingScreenRing = false;
-        let screenRingInitialQuat = new Quaternion();
+        let prevRingAngle = 0;
+        let initialRingQuat = new Quaternion();
         let aimAxis = new Vector3();
-        scene!.onBeforeRenderObservable.add(() => {
+
+        scene.onBeforeRenderObservable.add(() => {
           if (isDraggingScreenRing) return;
-          if (selectedNodeRef.current && scene!.activeCamera) {
+          if (selectedNodeRef.current && scene.activeCamera) {
             const objPos = selectedNodeRef.current.absolutePosition;
-            const camPos = scene!.activeCamera.globalPosition;
+            const camPos = scene.activeCamera.globalPosition;
             Matrix.LookAtLHToRef(objPos, camPos, Vector3.Up(), _lookAtMat);
             _lookAtMat.invert();
             _lookAtMat.decompose(undefined, proxyNode.rotationQuaternion!, undefined);
@@ -680,19 +745,24 @@ export default function TestScene({ onClose }: TestSceneProps) {
             proxyNode.computeWorldMatrix(true);
           }
         });
-        scene!.onBeforeRenderObservable.add(() => {
+
+        scene.onBeforeRenderObservable.add(() => {
           const shouldShow = gm.rotationGizmoEnabled && selectedNodeRef.current !== null;
-          if ((screenRing as any)._rootMesh) (screenRing as any)._rootMesh.setEnabled(shouldShow);
+          if ((screenRing as any)._rootMesh) {
+            (screenRing as any)._rootMesh.setEnabled(shouldShow);
+          }
         });
+
         screenRing.dragBehavior.onDragStartObservable.add(() => {
           const n = selectedNodeRef.current;
-          if (!n || !scene!.activeCamera) return;
+          if (!n || !scene.activeCamera) return;
           isDraggingScreenRing = true;
           n.isDraggingRotation = true;
+          prevRingAngle = 0;
           const localMat = n.matrixStack.evaluate();
           const _s = new Vector3(), _t = new Vector3();
-          localMat.decompose(_s, screenRingInitialQuat, _t);
-          aimAxis = scene!.activeCamera.globalPosition.subtract(n.absolutePosition).normalize();
+          localMat.decompose(_s, initialRingQuat, _t);
+          aimAxis = scene.activeCamera.globalPosition.subtract(n.absolutePosition).normalize();
           const parentNode = n.parent as TransformNode;
           if (parentNode) {
             const invParentWorld = new Matrix();
@@ -701,27 +771,35 @@ export default function TestScene({ onClose }: TestSceneProps) {
             aimAxis.normalize();
           }
         });
+
         screenRing.dragBehavior.onDragObservable.add(() => {
           const n = selectedNodeRef.current;
           if (!n) return;
-          const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
-          const newRot = rotDelta.multiply(screenRingInitialQuat);
+          const delta = -screenRing.angle - prevRingAngle;
+          prevRingAngle = -screenRing.angle;
+          if (Math.abs(delta) < 0.0001) return;
+          const rotDelta = Quaternion.RotationAxis(aimAxis, delta);
+          const newRot = initialRingQuat.multiply(rotDelta);
           const euler = newRot.toEulerAngles();
           n.setChannel('rotateX', euler.x);
           n.setChannel('rotateY', euler.y);
           n.setChannel('rotateZ', euler.z);
           n.syncToBabylon();
         });
+
         screenRing.dragBehavior.onDragEndObservable.add(() => {
           isDraggingScreenRing = false;
           const n = selectedNodeRef.current;
           if (n) { n.isDraggingRotation = false; n.syncToBabylon(); }
         });
+
         (rotGizmo as any)._screenRing = screenRing;
       }
     }
 
-    // ---- SCALE GIZMO WIRING ----
+    // =====================================================
+    // SCALE GIZMO WIRING
+    // =====================================================
     if (gm.gizmos.scaleGizmo) {
       const scaleG = gm.gizmos.scaleGizmo;
       const SCALE_SENSITIVITY = 0.05;
@@ -846,8 +924,12 @@ export default function TestScene({ onClose }: TestSceneProps) {
 
   const handleRotateModeChange = useCallback((mode: RotateMode) => {
     setRotateMode(mode);
-    if (gizmoModeManagerRef.current) {
-      gizmoModeManagerRef.current.setRotateMode(mode);
+    const gm = gizmoManagerRef.current;
+    const gmm = gizmoModeManagerRef.current;
+    if (gm) {
+      gm.rotationGizmoEnabled = false; // Detach first
+      gmm?.setRotateMode(mode);
+      gm.rotationGizmoEnabled = true;  // Re-attach to apply new mode
     }
   }, []);
 
