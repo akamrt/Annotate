@@ -222,307 +222,7 @@ export default function TestScene({ onClose }: TestSceneProps) {
       gizmoManager.gizmos.positionGizmo.planarGizmoEnabled = true;
     }
 
-    const wireCustomGizmos = () => {
-      if (gizmoManager.gizmos.positionGizmo) {
-        const posG = gizmoManager.gizmos.positionGizmo;
-        if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.clear();
-        if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.clear();
-        if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.clear();
-        if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.clear();
-        if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.clear();
-        if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.clear();
-
-        const broadcastTranslationDelta = (delta: Vector3) => {
-          selectionArrayRef.current.forEach(n => {
-            n.setChannel('translateX', n.translateX + delta.x);
-            n.setChannel('translateY', n.translateY + delta.y);
-            n.setChannel('translateZ', n.translateZ + delta.z);
-            n.syncToBabylon();
-          });
-        };
-
-        if (!(gizmoManager as any)._cameraSpaceGizmo) {
-          const utilScene = gizmoManager.utilityLayer.utilityLayerScene;
-          const screenBoxMat = new StandardMaterial("screenBoxMat", utilScene);
-          screenBoxMat.emissiveColor = new Color3(0.2, 0.8, 1.0); // Maya light blue
-          screenBoxMat.alpha = 0.5;
-          screenBoxMat.disableLighting = true;
-          screenBoxMat.backFaceCulling = false; // Prevent it from being invisible
-
-          const screenBox = MeshBuilder.CreateBox("screenDragBox", { size: 0.05, depth: 0.001 }, utilScene);
-          screenBox.material = screenBoxMat;
-          screenBox.billboardMode = Mesh.BILLBOARDMODE_ALL;
-          
-          // Connect visually straight to the Gizmo's internal core so it never drags off-center
-          if ((posG as any)._rootMesh) {
-             screenBox.setParent((posG as any)._rootMesh);
-          }
-          
-          const screenDragBehavior = new PointerDragBehavior({}); // Unconstrained = Camera space
-          screenDragBehavior.useObjectOrientationForDragging = false;
-          // CRITICAL: Prevent the pointer from literally dragging the Mesh out of the Gizmo!
-          screenDragBehavior.moveAttached = false; 
-          screenBox.addBehavior(screenDragBehavior);
-
-          screenDragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-          
-          (gizmoManager as any)._cameraSpaceGizmo = screenBox;
-        }
-
-        // Ensure the move element is hidden when orientation (rotation) mode is active
-        if ((gizmoManager as any)._cameraSpaceGizmo) {
-          (gizmoManager as any)._cameraSpaceGizmo.isVisible = gizmoManager.positionGizmoEnabled;
-        }
-
-        if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-        if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-        if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-        if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-        if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-        if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
-
-        // Maya Styling: Native orthogonal drag squares should be comfortably small and highly transparent, deferring focus to the main axes.
-        const styleOrthogonalPlane = (planeGizmo: any) => {
-          if (!planeGizmo || !planeGizmo._rootMesh) return;
-          planeGizmo._rootMesh.scaling.setAll(0.65);
-          planeGizmo._rootMesh.getChildMeshes().forEach((m: any) => {
-            if (m.material && m.material.alpha !== undefined) {
-              // Default state: Only wires visible, completely transparent fill!
-              m.material.alpha = 0.0;
-              m.enableEdgesRendering();
-              m.edgesWidth = 6.0;
-              m.edgesColor = new Color4(
-                 m.material.emissiveColor ? m.material.emissiveColor.r : 0.8,
-                 m.material.emissiveColor ? m.material.emissiveColor.g : 0.8,
-                 m.material.emissiveColor ? m.material.emissiveColor.b : 0.8,
-                 1.0
-              );
-              
-              const utilScene = gizmoManager.utilityLayer.utilityLayerScene;
-              if (!m.actionManager) m.actionManager = new ActionManager(utilScene);
-              
-              // Hover ON -> fill slightly like Maya
-              m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, () => {
-                  m.material.alpha = 0.45;
-              }));
-              
-              // Hover OFF -> invisible fill
-              m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, () => {
-                  m.material.alpha = 0.0;
-              }));
-            }
-          });
-        };
-        styleOrthogonalPlane(posG.xPlaneGizmo);
-        styleOrthogonalPlane(posG.yPlaneGizmo);
-        styleOrthogonalPlane(posG.zPlaneGizmo);
-      }
-
-      // ---------------------------------------------------------------
-      // ROTATION GIZMO WIRING — quaternion world-space rotation
-      //
-      // Each gizmo (X/Y/Z axis + screen ring) stores its own observer
-      // state DIRECTLY on the gizmo object as _rotWired. This avoids:
-      //   1. A single flag being set on the wrong gizmo instance
-      //   2. Early returns skipping flag assignment
-      //   3. Duplicate observers from re-wiring
-      // ---------------------------------------------------------------
-      const rotGizmo = gizmoManager.gizmos.rotationGizmo;
-      if (rotGizmo) {
-        const wireRotationGizmos = () => {
-          const rotG = gizmoManager.gizmos.rotationGizmo;
-          if (!rotG) return;
-
-          // Check each axis gizmo independently — wire only if not yet wired
-          const wireAxis = (
-            axis: 'x' | 'y' | 'z',
-            worldAxis: Vector3,
-          ) => {
-            const axisGizmo = axis === 'x' ? rotG.xGizmo : axis === 'y' ? rotG.yGizmo : rotG.zGizmo;
-            if (!axisGizmo) return;
-            if ((axisGizmo as any)._rotWired) return; // Already wired this gizmo
-            (axisGizmo as any)._rotWired = true;
-
-            // Set world-space orientation
-            axisGizmo.updateGizmoRotationToMatchAttachedMesh = false;
-
-            // Capture state in closures bound to THIS specific axis gizmo
-            let initialRotQuat = new Quaternion();
-
-            axisGizmo.dragBehavior.onDragStartObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (!n) return;
-              n.isDraggingRotation = true;
-              const localMat = n.matrixStack.evaluate();
-              const _s = new Vector3(), _t = new Vector3();
-              localMat.decompose(_s, initialRotQuat, _t);
-            });
-
-            axisGizmo.dragBehavior.onDragObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (!n) return;
-              // angle accumulates total drag since dragStart (Babylon handles this)
-              const rotDelta = Quaternion.RotationAxis(worldAxis, axisGizmo.angle);
-              const newRot = rotDelta.multiply(initialRotQuat);
-              const euler = newRot.toEulerAngles();
-              n.setChannel('rotateX', euler.x);
-              n.setChannel('rotateY', euler.y);
-              n.setChannel('rotateZ', euler.z);
-              n.syncToBabylon();
-            });
-
-            axisGizmo.dragBehavior.onDragEndObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (n) {
-                n.isDraggingRotation = false;
-                n.syncToBabylon();
-              }
-            });
-          };
-
-          wireAxis('x', Vector3.Right());
-          wireAxis('y', Vector3.Up());
-          wireAxis('z', Vector3.Forward());
-
-          // --- Screen-space (Maya-style) rotation ring ---
-          if (!(rotG as any)._screenRingWired) {
-            (rotG as any)._screenRingWired = true;
-
-            const screenRing = new PlaneRotationGizmo(
-              new Vector3(0, 0, 1),
-              Color3.FromHexString('#00ffff'),
-              gizmoManager.utilityLayer,
-            );
-
-            const proxyNode = new TransformNode('screenRingProxy', scene);
-            proxyNode.rotationQuaternion = Quaternion.Identity();
-            screenRing.attachedNode = proxyNode;
-            screenRing.updateGizmoRotationToMatchAttachedMesh = true;
-            screenRing.scaleRatio = 1.35;
-
-            const _lookAtMat = new Matrix();
-            let isDraggingScreenRing = false;
-            let screenRingInitialQuat = new Quaternion();
-            let aimAxis = new Vector3();
-
-            // Every frame: aim proxyNode +Z at camera
-            scene.onBeforeRenderObservable.add(() => {
-              if (isDraggingScreenRing) return;
-              if (selectedNodeRef.current && scene.activeCamera) {
-                const objPos = selectedNodeRef.current.absolutePosition;
-                const camPos = scene.activeCamera.globalPosition;
-                Matrix.LookAtLHToRef(objPos, camPos, Vector3.Up(), _lookAtMat);
-                _lookAtMat.invert();
-                _lookAtMat.decompose(undefined, proxyNode.rotationQuaternion!, undefined);
-                proxyNode.position.copyFrom(objPos);
-                proxyNode.computeWorldMatrix(true);
-              }
-            });
-
-            // Visibility: show only when rotation mode is active
-            scene.onBeforeRenderObservable.add(() => {
-              const shouldShow = gizmoManager.rotationGizmoEnabled && selectedNodeRef.current !== null;
-              if ((screenRing as any)._rootMesh) {
-                (screenRing as any)._rootMesh.setEnabled(shouldShow);
-              }
-            });
-
-            screenRing.dragBehavior.onDragStartObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (!n || !scene.activeCamera) return;
-              isDraggingScreenRing = true;
-              n.isDraggingRotation = true;
-              const localMat = n.matrixStack.evaluate();
-              const _s = new Vector3(), _t = new Vector3();
-              localMat.decompose(_s, screenRingInitialQuat, _t);
-              aimAxis = scene.activeCamera.globalPosition
-                .subtract(n.absolutePosition)
-                .normalize();
-              const parentNode = n.parent as TransformNode;
-              if (parentNode) {
-                const invParentWorld = new Matrix();
-                parentNode.computeWorldMatrix(true).invertToRef(invParentWorld);
-                Vector3.TransformNormalToRef(aimAxis, invParentWorld, aimAxis);
-                aimAxis.normalize();
-              }
-            });
-
-            screenRing.dragBehavior.onDragObservable.add(() => {
-              const n = selectedNodeRef.current;
-              if (!n) return;
-              const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
-              const newRot = rotDelta.multiply(screenRingInitialQuat);
-              const euler = newRot.toEulerAngles();
-              n.setChannel('rotateX', euler.x);
-              n.setChannel('rotateY', euler.y);
-              n.setChannel('rotateZ', euler.z);
-              n.syncToBabylon();
-            });
-
-            screenRing.dragBehavior.onDragEndObservable.add(() => {
-              isDraggingScreenRing = false;
-              const n = selectedNodeRef.current;
-              if (n) {
-                n.isDraggingRotation = false;
-                n.syncToBabylon();
-              }
-            });
-
-            (rotG as any)._screenRing = screenRing;
-          }
-        };
-
-        wireRotationGizmos();
-      }
-
-      // Babylon's AxisScaleGizmo natively fails to scale TransformNodes without bounding boxes.
-      // We explicitly bridge its per-tick UI dragDelta straight into our continuous channel.
-      if (gizmoManager.gizmos.scaleGizmo) {
-        const scaleG = gizmoManager.gizmos.scaleGizmo;
-        // Sensitivity ratio that translates pixel drag distance to fractional Maya scale.
-        const SCALE_SENSITIVITY = 0.05;
-        
-        if (scaleG.xGizmo) scaleG.xGizmo.dragBehavior.onDragObservable.clear();
-        if (scaleG.yGizmo) scaleG.yGizmo.dragBehavior.onDragObservable.clear();
-        if (scaleG.zGizmo) scaleG.zGizmo.dragBehavior.onDragObservable.clear();
-        if (scaleG.uniformScaleGizmo) scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.clear();
-
-        if (scaleG.xGizmo) {
-          scaleG.xGizmo.dragBehavior.onDragObservable.add((e) => {
-            const n = selectedNodeRef.current;
-            // e.dragDistance is the fractional distance moved *this exact frame*.
-            // Accumulate it onto the current scale explicitly to prevent glitching jumps.
-            if (n) { n.setChannel('scaleX', n.scaleX + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
-          });
-        }
-        if (scaleG.yGizmo) {
-          scaleG.yGizmo.dragBehavior.onDragObservable.add((e) => {
-            const n = selectedNodeRef.current;
-            if (n) { n.setChannel('scaleY', n.scaleY + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
-          });
-        }
-        if (scaleG.zGizmo) {
-          scaleG.zGizmo.dragBehavior.onDragObservable.add((e) => {
-            const n = selectedNodeRef.current;
-            if (n) { n.setChannel('scaleZ', n.scaleZ + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
-          });
-        }
-        if (scaleG.uniformScaleGizmo) {
-          scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.add((e) => {
-            const n = selectedNodeRef.current;
-            if (n) {
-              const delta = e.dragDistance * SCALE_SENSITIVITY;
-              n.setChannel('scaleX', n.scaleX + delta);
-              n.setChannel('scaleY', n.scaleY + delta);
-              n.setChannel('scaleZ', n.scaleZ + delta);
-              n.syncToBabylon();
-            }
-          });
-        }
-      }
-    };
-    
-    // Wire immediately in case any initialized
+    // Wire all gizmos (shared useCallback, called after gizmoManager is ready)
     wireCustomGizmos();
 
     // Camera
@@ -831,6 +531,236 @@ export default function TestScene({ onClose }: TestSceneProps) {
     
     return removeDirtyObserver;
   }, [selectionArray, selectedNode]);
+
+  // ---- Shared gizmo wiring (called from useEffect init AND mode-change hotkeys) ----
+  const wireCustomGizmos = useCallback(() => {
+    const gm = gizmoManagerRef.current;
+    const scene = sceneRef.current;
+    if (!gm) return;
+
+    // ---- POSITION GIZMO WIRING ----
+    if (gm.gizmos.positionGizmo) {
+      const posG = gm.gizmos.positionGizmo;
+      if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.clear();
+      if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.clear();
+      if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.clear();
+      if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.clear();
+      if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.clear();
+      if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.clear();
+
+      const broadcastTranslationDelta = (delta: Vector3) => {
+        selectionArrayRef.current.forEach(n => {
+          n.setChannel('translateX', n.translateX + delta.x);
+          n.setChannel('translateY', n.translateY + delta.y);
+          n.setChannel('translateZ', n.translateZ + delta.z);
+          n.syncToBabylon();
+        });
+      };
+
+      if (!(gm as any)._cameraSpaceGizmo) {
+        const utilScene = gm.utilityLayer.utilityLayerScene;
+        const screenBoxMat = new StandardMaterial("screenBoxMat", utilScene);
+        screenBoxMat.emissiveColor = new Color3(0.2, 0.8, 1.0);
+        screenBoxMat.alpha = 0.5;
+        screenBoxMat.disableLighting = true;
+        screenBoxMat.backFaceCulling = false;
+        const screenBox = MeshBuilder.CreateBox("screenDragBox", { size: 0.05, depth: 0.001 }, utilScene);
+        screenBox.material = screenBoxMat;
+        screenBox.billboardMode = Mesh.BILLBOARDMODE_ALL;
+        if ((posG as any)._rootMesh) screenBox.setParent((posG as any)._rootMesh);
+        const screenDragBehavior = new PointerDragBehavior({});
+        screenDragBehavior.useObjectOrientationForDragging = false;
+        screenDragBehavior.moveAttached = false;
+        screenBox.addBehavior(screenDragBehavior);
+        screenDragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+        (gm as any)._cameraSpaceGizmo = screenBox;
+      }
+
+      if ((gm as any)._cameraSpaceGizmo) {
+        (gm as any)._cameraSpaceGizmo.isVisible = gm.positionGizmoEnabled;
+      }
+
+      if (posG.xGizmo) posG.xGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+      if (posG.yGizmo) posG.yGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+      if (posG.zGizmo) posG.zGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+      if (posG.xPlaneGizmo) posG.xPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+      if (posG.yPlaneGizmo) posG.yPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+      if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.add((e) => broadcastTranslationDelta(e.delta));
+
+      const styleOrthogonalPlane = (planeGizmo: any) => {
+        if (!planeGizmo || !planeGizmo._rootMesh) return;
+        planeGizmo._rootMesh.scaling.setAll(0.65);
+        planeGizmo._rootMesh.getChildMeshes().forEach((m: any) => {
+          if (m.material && m.material.alpha !== undefined) {
+            m.material.alpha = 0.0;
+            m.enableEdgesRendering();
+            m.edgesWidth = 6.0;
+            m.edgesColor = new Color4(
+              m.material.emissiveColor ? m.material.emissiveColor.r : 0.8,
+              m.material.emissiveColor ? m.material.emissiveColor.g : 0.8,
+              m.material.emissiveColor ? m.material.emissiveColor.b : 0.8,
+              1.0
+            );
+            const utilScene = gm.utilityLayer.utilityLayerScene;
+            if (!m.actionManager) m.actionManager = new ActionManager(utilScene);
+            m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, () => {
+              m.material.alpha = 0.45;
+            }));
+            m.actionManager.registerAction(new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, () => {
+              m.material.alpha = 0.0;
+            }));
+          }
+        });
+      };
+      styleOrthogonalPlane(posG.xPlaneGizmo);
+      styleOrthogonalPlane(posG.yPlaneGizmo);
+      styleOrthogonalPlane(posG.zPlaneGizmo);
+    }
+
+    // ---- ROTATION GIZMO WIRING — quaternion world-space rotation ----
+    const rotGizmo = gm.gizmos.rotationGizmo;
+    if (rotGizmo) {
+      const wireAxis = (axis: 'x' | 'y' | 'z', worldAxis: Vector3) => {
+        const axisGizmo = axis === 'x' ? rotGizmo.xGizmo : axis === 'y' ? rotGizmo.yGizmo : rotGizmo.zGizmo;
+        if (!axisGizmo) return;
+        if ((axisGizmo as any)._rotWired) return;
+        (axisGizmo as any)._rotWired = true;
+        axisGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+        let initialRotQuat = new Quaternion();
+        axisGizmo.dragBehavior.onDragStartObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (!n) return;
+          n.isDraggingRotation = true;
+          const localMat = n.matrixStack.evaluate();
+          const _s = new Vector3(), _t = new Vector3();
+          localMat.decompose(_s, initialRotQuat, _t);
+        });
+        axisGizmo.dragBehavior.onDragObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (!n) return;
+          const rotDelta = Quaternion.RotationAxis(worldAxis, axisGizmo.angle);
+          const newRot = rotDelta.multiply(initialRotQuat);
+          const euler = newRot.toEulerAngles();
+          n.setChannel('rotateX', euler.x);
+          n.setChannel('rotateY', euler.y);
+          n.setChannel('rotateZ', euler.z);
+          n.syncToBabylon();
+        });
+        axisGizmo.dragBehavior.onDragEndObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (n) { n.isDraggingRotation = false; n.syncToBabylon(); }
+        });
+      };
+
+      wireAxis('x', Vector3.Right());
+      wireAxis('y', Vector3.Up());
+      wireAxis('z', Vector3.Forward());
+
+      if (!(rotGizmo as any)._screenRingWired) {
+        (rotGizmo as any)._screenRingWired = true;
+        const screenRing = new PlaneRotationGizmo(new Vector3(0, 0, 1), Color3.FromHexString('#00ffff'), gm.utilityLayer);
+        const proxyNode = new TransformNode('screenRingProxy', scene!);
+        proxyNode.rotationQuaternion = Quaternion.Identity();
+        screenRing.attachedNode = proxyNode;
+        screenRing.updateGizmoRotationToMatchAttachedMesh = true;
+        screenRing.scaleRatio = 1.35;
+        const _lookAtMat = new Matrix();
+        let isDraggingScreenRing = false;
+        let screenRingInitialQuat = new Quaternion();
+        let aimAxis = new Vector3();
+        scene!.onBeforeRenderObservable.add(() => {
+          if (isDraggingScreenRing) return;
+          if (selectedNodeRef.current && scene!.activeCamera) {
+            const objPos = selectedNodeRef.current.absolutePosition;
+            const camPos = scene!.activeCamera.globalPosition;
+            Matrix.LookAtLHToRef(objPos, camPos, Vector3.Up(), _lookAtMat);
+            _lookAtMat.invert();
+            _lookAtMat.decompose(undefined, proxyNode.rotationQuaternion!, undefined);
+            proxyNode.position.copyFrom(objPos);
+            proxyNode.computeWorldMatrix(true);
+          }
+        });
+        scene!.onBeforeRenderObservable.add(() => {
+          const shouldShow = gm.rotationGizmoEnabled && selectedNodeRef.current !== null;
+          if ((screenRing as any)._rootMesh) (screenRing as any)._rootMesh.setEnabled(shouldShow);
+        });
+        screenRing.dragBehavior.onDragStartObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (!n || !scene!.activeCamera) return;
+          isDraggingScreenRing = true;
+          n.isDraggingRotation = true;
+          const localMat = n.matrixStack.evaluate();
+          const _s = new Vector3(), _t = new Vector3();
+          localMat.decompose(_s, screenRingInitialQuat, _t);
+          aimAxis = scene!.activeCamera.globalPosition.subtract(n.absolutePosition).normalize();
+          const parentNode = n.parent as TransformNode;
+          if (parentNode) {
+            const invParentWorld = new Matrix();
+            parentNode.computeWorldMatrix(true).invertToRef(invParentWorld);
+            Vector3.TransformNormalToRef(aimAxis, invParentWorld, aimAxis);
+            aimAxis.normalize();
+          }
+        });
+        screenRing.dragBehavior.onDragObservable.add(() => {
+          const n = selectedNodeRef.current;
+          if (!n) return;
+          const rotDelta = Quaternion.RotationAxis(aimAxis, -screenRing.angle);
+          const newRot = rotDelta.multiply(screenRingInitialQuat);
+          const euler = newRot.toEulerAngles();
+          n.setChannel('rotateX', euler.x);
+          n.setChannel('rotateY', euler.y);
+          n.setChannel('rotateZ', euler.z);
+          n.syncToBabylon();
+        });
+        screenRing.dragBehavior.onDragEndObservable.add(() => {
+          isDraggingScreenRing = false;
+          const n = selectedNodeRef.current;
+          if (n) { n.isDraggingRotation = false; n.syncToBabylon(); }
+        });
+        (rotGizmo as any)._screenRing = screenRing;
+      }
+    }
+
+    // ---- SCALE GIZMO WIRING ----
+    if (gm.gizmos.scaleGizmo) {
+      const scaleG = gm.gizmos.scaleGizmo;
+      const SCALE_SENSITIVITY = 0.05;
+      if (scaleG.xGizmo) scaleG.xGizmo.dragBehavior.onDragObservable.clear();
+      if (scaleG.yGizmo) scaleG.yGizmo.dragBehavior.onDragObservable.clear();
+      if (scaleG.zGizmo) scaleG.zGizmo.dragBehavior.onDragObservable.clear();
+      if (scaleG.uniformScaleGizmo) scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.clear();
+      if (scaleG.xGizmo) {
+        scaleG.xGizmo.dragBehavior.onDragObservable.add((e) => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('scaleX', n.scaleX + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+        });
+      }
+      if (scaleG.yGizmo) {
+        scaleG.yGizmo.dragBehavior.onDragObservable.add((e) => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('scaleY', n.scaleY + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+        });
+      }
+      if (scaleG.zGizmo) {
+        scaleG.zGizmo.dragBehavior.onDragObservable.add((e) => {
+          const n = selectedNodeRef.current;
+          if (n) { n.setChannel('scaleZ', n.scaleZ + (e.dragDistance * SCALE_SENSITIVITY)); n.syncToBabylon(); }
+        });
+      }
+      if (scaleG.uniformScaleGizmo) {
+        scaleG.uniformScaleGizmo.dragBehavior.onDragObservable.add((e) => {
+          const n = selectedNodeRef.current;
+          if (n) {
+            const delta = e.dragDistance * SCALE_SENSITIVITY;
+            n.setChannel('scaleX', n.scaleX + delta);
+            n.setChannel('scaleY', n.scaleY + delta);
+            n.setChannel('scaleZ', n.scaleZ + delta);
+            n.syncToBabylon();
+          }
+        });
+      }
+    }
+  }, []);
 
   // ---- Handlers ----
 
