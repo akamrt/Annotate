@@ -27,6 +27,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { PointerEventTypes } from '@babylonjs/core/Events/pointerEvents';
 import { HighlightLayer } from '@babylonjs/core/Layers/highlightLayer';
 import { GizmoManager } from '@babylonjs/core/Gizmos/gizmoManager';
+import { GizmoCoordinatesMode } from '@babylonjs/core/Gizmos/gizmo';
 import { PlaneRotationGizmo } from '@babylonjs/core/Gizmos/planeRotationGizmo';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { PointerDragBehavior } from '@babylonjs/core/Behaviors/Meshes/pointerDragBehavior';
@@ -655,7 +656,8 @@ export default function TestScene({ onClose }: TestSceneProps) {
         if (!axisGizmo) return;
         if ((axisGizmo as any)._rotWired) return;
         (axisGizmo as any)._rotWired = true;
-        axisGizmo.updateGizmoRotationToMatchAttachedMesh = false;
+        // Default to world space; GizmoModeManager._setRotateMode() will
+        // update this via coordinatesMode when the mode changes.
 
         // State captured per-drag (not shared across axes)
         let prevAngle = 0;
