@@ -277,14 +277,14 @@ export class GizmoModeManager {
       this.onRotationChange?.(this._attachedNode);
     }
 
-    this._isDragging = false;
-    this._activeRing = null;
-    this._dragStartPoint = null;
-
-    // Reset highlighting
+    // Reset highlighting BEFORE clearing active ring
     if (this._activeRing) {
       this._highlightRing(this._activeRing, false);
     }
+
+    this._isDragging = false;
+    this._activeRing = null;
+    this._dragStartPoint = null;
   }
 
   // -----------------------------------------------------------------------
@@ -368,6 +368,7 @@ export class GizmoModeManager {
     this._rotateMode = mode;
 
     const rotGizmo = this._gizmoManager.gizmos.rotationGizmo;
+    const posGizmo = this._gizmoManager.gizmos.positionGizmo;
 
     switch (mode) {
       case 'world':
@@ -376,6 +377,12 @@ export class GizmoModeManager {
           rotGizmo.xGizmo && (rotGizmo.xGizmo.updateGizmoRotationToMatchAttachedMesh = false);
           rotGizmo.yGizmo && (rotGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = false);
           rotGizmo.zGizmo && (rotGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+        }
+        // Position gizmo: world-space axes
+        if (posGizmo) {
+          posGizmo.xGizmo && (posGizmo.xGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+          posGizmo.yGizmo && (posGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+          posGizmo.zGizmo && (posGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = false);
         }
         // Hide gimbal rings
         this._gimbalRings.forEach(r => r.mesh.setEnabled(false));
@@ -388,6 +395,12 @@ export class GizmoModeManager {
           rotGizmo.yGizmo && (rotGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = true);
           rotGizmo.zGizmo && (rotGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = true);
         }
+        // Position gizmo: local-space axes
+        if (posGizmo) {
+          posGizmo.xGizmo && (posGizmo.xGizmo.updateGizmoRotationToMatchAttachedMesh = true);
+          posGizmo.yGizmo && (posGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = true);
+          posGizmo.zGizmo && (posGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = true);
+        }
         // Hide gimbal rings (use Babylon's native local rotation)
         this._gimbalRings.forEach(r => r.mesh.setEnabled(false));
         break;
@@ -399,6 +412,12 @@ export class GizmoModeManager {
           rotGizmo.xGizmo && (rotGizmo.xGizmo.updateGizmoRotationToMatchAttachedMesh = false);
           rotGizmo.yGizmo && (rotGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = false);
           rotGizmo.zGizmo && (rotGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+        }
+        // Position gizmo: world-space axes in gimbal mode
+        if (posGizmo) {
+          posGizmo.xGizmo && (posGizmo.xGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+          posGizmo.yGizmo && (posGizmo.yGizmo.updateGizmoRotationToMatchAttachedMesh = false);
+          posGizmo.zGizmo && (posGizmo.zGizmo.updateGizmoRotationToMatchAttachedMesh = false);
         }
         // Show gimbal rings
         this._gimbalRings.forEach(r => r.mesh.setEnabled(true));

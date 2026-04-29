@@ -549,10 +549,20 @@ export default function TestScene({ onClose }: TestSceneProps) {
       if (posG.zPlaneGizmo) posG.zPlaneGizmo.dragBehavior.onDragObservable.clear();
 
       const broadcastTranslationDelta = (delta: Vector3) => {
+        const mode = gizmoModeManagerRef.current?.rotateMode ?? 'world';
         selectionArrayRef.current.forEach(n => {
-          n.setChannel('translateX', n.translateX + delta.x);
-          n.setChannel('translateY', n.translateY + delta.y);
-          n.setChannel('translateZ', n.translateZ + delta.z);
+          let d = delta;
+          // In local mode, transform world-space delta into the node's local frame
+          if (mode === 'local' || mode === 'gimbal') {
+            const localMat = n.matrixStack.evaluate();
+            const _s = new Vector3(), rotQuat = new Quaternion(), _t = new Vector3();
+            localMat.decompose(_s, rotQuat, _t);
+            const invQ = rotQuat.conjugate();
+            d = Vector3.TransformNormal(delta, invQ.toRotationMatrix());
+          }
+          n.setChannel('translateX', n.translateX + d.x);
+          n.setChannel('translateY', n.translateY + d.y);
+          n.setChannel('translateZ', n.translateZ + d.z);
           n.syncToBabylon();
         });
       };
